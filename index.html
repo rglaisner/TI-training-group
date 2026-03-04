@@ -269,6 +269,53 @@
             }
         ];
 
+        // WORKSTREAM H – TOOLS WORKSPACE MODEL
+        const TOOL_DEFINITIONS = [
+            {
+                id: "headcount_planner",
+                label: "Headcount Planner",
+                description: "What-if calculator for roles, timeline, and capacity.",
+                kind: "headcount"
+            },
+            {
+                id: "market_visualizer",
+                label: "Market & Comp View",
+                description: "Contextual view of market and compensation snapshots linked to the current step.",
+                kind: "market"
+            },
+            {
+                id: "evidence_board",
+                label: "Evidence Board",
+                description: "Notebook space for notes, hypotheses, and links captured during a mission.",
+                kind: "notes"
+            }
+        ];
+
+        const DEFAULT_TOOL_IDS = TOOL_DEFINITIONS.map((tool) => tool.id);
+
+        const getToolDefinition = (toolId) => {
+            if (!toolId) {
+                return null;
+            }
+            return TOOL_DEFINITIONS.find((tool) => tool.id === toolId) || null;
+        };
+
+        const getToolsForScenario = (scenario) => {
+            if (!scenario || !scenario.tools || !Array.isArray(scenario.tools.enabledToolIds)) {
+                return DEFAULT_TOOL_IDS;
+            }
+
+            const enabled = scenario.tools.enabledToolIds.filter((toolId) =>
+                TOOL_DEFINITIONS.some((tool) => tool.id === toolId)
+            );
+
+            if (enabled.length === 0) {
+                return DEFAULT_TOOL_IDS;
+            }
+
+            return enabled;
+        };
+
         const ADMIN_STORAGE_KEY_V1 = "ti_admin_config_v1";
         const ADMIN_STORAGE_KEY_V2 = "ti_admin_config_v2";
         const CUSTOM_SCENARIOS_STORAGE_KEY = "ti_custom_scenarios_v1";
@@ -2022,10 +2069,18 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                 );
             };
 
-            const ToolsPanel = ({ meta, onApplyScenario }) => {
+            const ToolsPanel = ({ meta, scenario, nodeId, integrationState, onToolEvent }) => {
+                const [activeToolId, setActiveToolId] = useState("headcount_planner");
                 const [location, setLocation] = useState("Berlin");
                 const [roles, setRoles] = useState(60);
                 const [months, setMonths] = useState(6);
+                const [note, setNote] = useState("");
+
+                const enabledToolIds = getToolsForScenario(scenario);
+                const toolsToRender = enabledToolIds.length > 0 ? enabledToolIds : DEFAULT_TOOL_IDS;
+                const effectiveActiveToolId = toolsToRender.includes(activeToolId)
+                    ? activeToolId
+                    : toolsToRender[0] || "headcount_planner";
 
                 const safeRoles = Number.isFinite(roles) ? roles : 0;
                 const safeMonths = Number.isFinite(months) && months > 0 ? months : 1;
@@ -2034,54 +2089,121 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                 const projectedTimeToFill = Math.ceil(safeRoles / monthlyHiringCapacity);
                 const capacityGap = projectedTimeToFill - safeMonths;
 
-                const applyScenario = () => {
-                    const riskDelta = capacityGap > 0 ? Math.min(20, capacityGap * 3) : -5;
-                    const advanceWeeks = safeMonths * 4;
+                const scenarioId = scenario && typeof scenario.id === "string" ? scenario.id : null;
+                const noteStorageKey = scenarioId ? `ti_tools_notes_${scenarioId}` : null;
 
-                    onApplyScenario({
-                        orgRiskDelta: riskDelta,
-                        advanceWeeks
+                React.useEffect(() => {
+                    if (!noteStorageKey) {
+                        setNote("");
+                        return;
+                    }
+                    try {
+                        const stored = window.localStorage.getItem(noteStorageKey);
+                        if (typeof stored === "string") {
+                            setNote(stored);
+                        } else {
+                            setNote("");
+                        }
+                    } catch (error) {
+                        // ignore storage failures
+                        setNote("");
+                    }
+                }, [noteStorageKey]);
+
+                const emitToolEvent = (partial) => {
+                    if (!onToolEvent) {
+                        return;
+                    }
+                    const base = partial && typeof partial === "object" ? partial : {};
+                    onToolEvent({
+                        toolId: base.toolId || effectiveActiveToolId,
+                        scenarioId,
+                        nodeId: nodeId || null,
+                        ...base
                     });
                 };
 
-                return (
-                    <div className="glass p-5 rounded-lg border border-white/10 space-y-4">
-                        <h4 className="text-[9px] mono text-white/30 uppercase tracking-[0.2em]">TI_TOOLS · MARKET_SIM</h4>
-                        <div className="space-y-3 text-[11px]">
-                            <div className="flex flex-col gap-1">
-                                <label className="text-white/40 mono">Target Location</label>
-                                <select
-                                    value={location}
-                                    onChange={(e) => setLocation(e.target.value)}
-                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
-                                >
-                                    <option value="Berlin">Berlin</option>
-                                    <option value="Amsterdam">Amsterdam</option>
-                                    <option value="Remote-first EU">Remote-first EU</option>
-                                </select>
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <label className="text-white/40 mono">Roles to Fill</label>
-                                <input
-                                    type="number"
-                                    min="1"
-                                    max="500"
-                                    value={roles}
-                                    onChange={(e) => setRoles(parseInt(e.target.value, 10) || 0)}
-                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
-                                />
-                            </div>
-                            <div className="flex flex-col gap-1">
-                                <label className="text-white/40 mono">Months Available</label>
-                                <input
-                                    type="number"
-                                    min="1"
-                                    max="36"
-                                    value={months}
-                                    onChange={(e) => setMonths(parseInt(e.target.value, 10) || 1)}
-                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
-                                />
-                            </div>
+                const applyHeadcountScenario = () => {
+                    const riskDelta = capacityGap > 0 ? Math.min(20, capacityGap * 3) : -5;
+                    const advanceWeeks = safeMonths * 4;
+
+                    emitToolEvent({
+                        toolId: "headcount_planner",
+                        kind: "apply_scenario",
+                        metaEffects: {
+                            orgRiskDelta: riskDelta,
+                            advanceWeeks
+                        },
+                        inputs: {
+                            location,
+                            roles: safeRoles,
+                            months: safeMonths
+                        }
+                    });
+                };
+
+                const handleSaveNote = () => {
+                    if (!note || !note.trim()) {
+                        return;
+                    }
+
+                    if (noteStorageKey) {
+                        try {
+                            window.localStorage.setItem(noteStorageKey, note);
+                        } catch (error) {
+                            // best-effort only
+                        }
+                    }
+
+                    const trimmed = note.trim();
+                    const words = trimmed.length > 0 ? trimmed.split(/\s+/) : [];
+                    const wordCount = words.length;
+                    const hasLinks = trimmed.includes("http://") || trimmed.includes("https://");
+
+                    emitToolEvent({
+                        toolId: "evidence_board",
+                        kind: "save_note",
+                        noteLength: note.length,
+                        noteWordCount: wordCount,
+                        hasLinks
+                    });
+                };
+
+                const renderHeadcountPlanner = () => (
+                    <div className="space-y-3 text-[11px]">
+                        <div className="flex flex-col gap-1">
+                            <label className="text-white/40 mono">Target Location</label>
+                            <select
+                                value={location}
+                                onChange={(e) => setLocation(e.target.value)}
+                                className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                            >
+                                <option value="Berlin">Berlin</option>
+                                <option value="Amsterdam">Amsterdam</option>
+                                <option value="Remote-first EU">Remote-first EU</option>
+                            </select>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                            <label className="text-white/40 mono">Roles to Fill</label>
+                            <input
+                                type="number"
+                                min="1"
+                                max="500"
+                                value={roles}
+                                onChange={(e) => setRoles(parseInt(e.target.value, 10) || 0)}
+                                className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                            />
+                        </div>
+                        <div className="flex flex-col gap-1">
+                            <label className="text-white/40 mono">Months Available</label>
+                            <input
+                                type="number"
+                                min="1"
+                                max="36"
+                                value={months}
+                                onChange={(e) => setMonths(parseInt(e.target.value, 10) || 1)}
+                                className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                            />
                         </div>
 
                         <div className="bg-white/5 rounded p-3 space-y-1 text-[10px] mono">
@@ -2098,15 +2220,157 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                         </div>
 
                         <button
-                            onClick={applyScenario}
+                            onClick={applyHeadcountScenario}
                             className="w-full mt-1 px-3 py-2 text-[10px] mono rounded border border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 transition-all"
                         >
                             APPLY_SCENARIO_TO_TIMELINE
                         </button>
+                    </div>
+                );
+
+                const renderMarketVisualizer = () => {
+                    const status = integrationState?.status || "idle";
+                    const payload = integrationState?.payload || null;
+                    const entries = payload ? Object.values(payload) : [];
+
+                    if (status === "idle") {
+                        return (
+                            <p className="text-[10px] text-white/40">
+                                This tool becomes active when a mission step requests external market or compensation data.
+                            </p>
+                        );
+                    }
+
+                    if (status === "loading") {
+                        return (
+                            <p className="text-[10px] text-white/40">
+                                Fetching a deterministic external data snapshot for this step…
+                            </p>
+                        );
+                    }
+
+                    if (status === "error") {
+                        return (
+                            <p className="text-[10px] text-amber-300">
+                                External data is not available. The simulation is running in offline/demo mode.
+                            </p>
+                        );
+                    }
+
+                    if (!entries || entries.length === 0) {
+                        return (
+                            <p className="text-[10px] text-white/40">
+                                No external market or compensation snapshots are attached to this node.
+                            </p>
+                        );
+                    }
+
+                    return (
+                        <div className="space-y-3 text-[10px]">
+                            {entries.map((entry, index) => {
+                                const snapshot = entry && entry.snapshot ? entry.snapshot : {};
+                                const title = snapshot.title || "Snapshot";
+                                const narrative = snapshot.narrative || "Deterministic demo data from the TI console.";
+                                const comparison = Array.isArray(snapshot.comparison) ? snapshot.comparison : null;
+                                const market = snapshot.market || null;
+                                const internal = snapshot.internal || null;
+
+                                return (
+                                    <div key={index} className="border-l border-white/10 pl-3 space-y-1">
+                                        <p className="text-[9px] mono text-white/40 uppercase">{title}</p>
+                                        <p className="text-white/70">{narrative}</p>
+                                        {comparison && (
+                                            <div className="mt-1 space-y-1">
+                                                {comparison.map((row, rowIndex) => (
+                                                    <p key={rowIndex} className="text-[10px] text-white/60">
+                                                        <span className="text-white">{row.location}</span>: pool ≈{" "}
+                                                        {row.estimatedTalentPool} · salary index {row.medianSalaryIndex} ·
+                                                        competition {row.competitionIndex} — {row.note}
+                                                    </p>
+                                                ))}
+                                            </div>
+                                        )}
+                                        {market && internal && (
+                                            <div className="mt-1 space-y-1">
+                                                <p className="text-[10px] text-emerald-300">
+                                                    Market median base: {market.medianBase} {market.currency}
+                                                </p>
+                                                <p className="text-[10px] text-white/60">
+                                                    Internal median base: {internal.medianBase} {internal.currency}
+                                                </p>
+                                            </div>
+                                        )}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    );
+                };
+
+                const renderEvidenceBoard = () => (
+                    <div className="space-y-2 text-[11px]">
+                        <p className="text-[10px] text-white/50">
+                            Capture quick notes, hypotheses, or links you would reference if a stakeholder asked,
+                            &ldquo;How did you get to this view?&rdquo;
+                        </p>
+                        <textarea
+                            value={note}
+                            onChange={(e) => setNote(e.target.value)}
+                            rows={5}
+                            className="w-full bg-black/40 border border-white/10 rounded px-2 py-1 text-xs resize-none"
+                            placeholder="Example: Key assumptions, caveats, links to docs or dashboards…"
+                        />
+                        <div className="flex items-center justify-between gap-2 text-[10px] mono text-white/40">
+                            <span>{note.length} chars</span>
+                            <button
+                                onClick={handleSaveNote}
+                                className="px-3 py-1 rounded border border-emerald-500/50 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20 transition-all"
+                            >
+                                SAVE_EVIDENCE_SNAPSHOT
+                            </button>
+                        </div>
+                    </div>
+                );
+
+                return (
+                    <div className="glass p-5 rounded-lg border border-white/10 space-y-4">
+                        <div className="flex items-center justify-between gap-2">
+                            <h4 className="text-[9px] mono text-white/30 uppercase tracking-[0.2em]">TI_TOOLS · WORKSPACE</h4>
+                        </div>
+
+                        <div className="flex gap-1 text-[10px] mono overflow-x-auto">
+                            {toolsToRender.map((toolId) => {
+                                const def = getToolDefinition(toolId);
+                                const isActive = toolId === effectiveActiveToolId;
+                                return (
+                                    <button
+                                        key={toolId}
+                                        type="button"
+                                        onClick={() => setActiveToolId(toolId)}
+                                        className={
+                                            "px-2 py-1 rounded border text-xs whitespace-nowrap " +
+                                            (isActive
+                                                ? "border-sky-500/70 bg-sky-500/20 text-sky-100"
+                                                : "border-white/10 bg-black/40 text-white/40 hover:border-sky-500/40 hover:text-sky-200")
+                                        }
+                                    >
+                                        {def ? def.label : toolId}
+                                    </button>
+                                );
+                            })}
+                        </div>
+
+                        {effectiveActiveToolId === "headcount_planner" && renderHeadcountPlanner()}
+                        {effectiveActiveToolId === "market_visualizer" && renderMarketVisualizer()}
+                        {effectiveActiveToolId === "evidence_board" && renderEvidenceBoard()}
 
                         <div className="border-t border-white/10 pt-3 mt-2 text-[10px] text-white/40 mono">
-                            <p>SIM_WEEK: <span className="text-white">{meta.timelineWeek}</span></p>
-                            <p>ORG_RISK: <span className="text-white">{meta.orgRisk}</span>/100</p>
+                            <p>
+                                SIM_WEEK: <span className="text-white">{meta.timelineWeek}</span>
+                            </p>
+                            <p>
+                                ORG_RISK: <span className="text-white">{meta.orgRisk}</span>/100
+                            </p>
                         </div>
                     </div>
                 );
@@ -2247,6 +2511,63 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                         });
                     }
                 };
+
+            const handleToolEvent = (toolEvent) => {
+                if (!toolEvent || typeof toolEvent.toolId !== "string") {
+                    return;
+                }
+
+                const scenarioId = toolEvent.scenarioId || (currentSim && currentSim.id) || null;
+                const nodeId = toolEvent.nodeId || currentNode || null;
+
+                const previousMeta = gameState.meta || createMeta();
+                let nextMeta = previousMeta;
+
+                if (toolEvent.metaEffects) {
+                    nextMeta = applyEffectsToMeta(previousMeta, toolEvent.metaEffects);
+                    setGameState((prev) => {
+                        const metaBefore = prev.meta || createMeta();
+                        const metaAfter = applyEffectsToMeta(metaBefore, toolEvent.metaEffects);
+                        return {
+                            ...prev,
+                            meta: metaAfter
+                        };
+                    });
+                }
+
+                if (user) {
+                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                    const experimentsForContext = getActiveExperimentsForContext({
+                        userId: user.uid,
+                        tenantId,
+                        scenarioId,
+                        tenantConfig
+                    });
+
+                    const payload = {
+                        scenarioId,
+                        nodeId,
+                        toolId: toolEvent.toolId,
+                        kind: toolEvent.kind || "interaction",
+                        inputs: toolEvent.inputs || null,
+                        metaBefore: previousMeta,
+                        metaAfter: nextMeta,
+                        noteLength: typeof toolEvent.noteLength === "number" ? toolEvent.noteLength : null,
+                        noteWordCount: typeof toolEvent.noteWordCount === "number" ? toolEvent.noteWordCount : null,
+                        hasLinks: Boolean(toolEvent.hasLinks)
+                    };
+
+                    logEvent(
+                        user.uid,
+                        "tool_used",
+                        payload,
+                        {
+                            tenantId,
+                            experiments: experimentsForContext
+                        }
+                    );
+                }
+            };
 
                 const knownTags = KNOWN_COMPETENCY_TAGS;
 
@@ -3070,13 +3391,10 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
 
                                         <ToolsPanel
                                             meta={gameState.meta || createMeta()}
-                                            onApplyScenario={(effects) => {
-                                                setGameState(prev => {
-                                                    const currentMeta = prev.meta || createMeta();
-                                                    const nextMeta = applyEffectsToMeta(currentMeta, effects);
-                                                    return { ...prev, meta: nextMeta };
-                                                });
-                                            }}
+                                            scenario={currentSim}
+                                            nodeId={currentNode}
+                                            integrationState={integrationState}
+                                            onToolEvent={handleToolEvent}
                                         />
                                     </div>
                                 </div>

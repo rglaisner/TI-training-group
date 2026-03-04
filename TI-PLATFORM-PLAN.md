@@ -176,6 +176,33 @@ Initial scope for Workstream E:
     - Identify missing scenario types or over-used patterns.
   - Document how Workstream C can use the same views to validate competency coverage.
 ﻿
+#### Workstream H – Advanced Multimodality & Tools Workspace
+
+- **Goal**: Enrich the in-mission workspace with a small set of first-class tools (headcount what-if planner, market/comp visualizer, evidence board) that live inside the existing console aesthetic and emit structured signals.
+- **Runtime model**:
+  - `TOOL_DEFINITIONS`: in-browser catalog of tools (`headcount_planner`, `market_visualizer`, `evidence_board`), each with id, label, description, and kind.
+  - Per-scenario configuration (optional):
+    - `scenario.tools.enabledToolIds: string[]` – if present, limits which tools appear in the sidebar for that mission; otherwise all default tools are available.
+  - `getToolsForScenario(scenario)`: helper that resolves the effective tool set for a mission, intersecting `enabledToolIds` with the known tool catalog.
+  - `ToolsPanel` component:
+    - Renders a **tabbed tools workspace** in the right-hand sidebar of the Simulation view.
+    - Tools implemented in the first iteration:
+      - **Headcount Planner** (`headcount_planner`): a what-if calculator for roles vs months vs implicit capacity. On apply, it computes a simple meta effect (`metaEffects: { orgRiskDelta, advanceWeeks }`) and emits a `tool_used` event.
+      - **Market & Comp Visualizer** (`market_visualizer`): a structured view over the existing external integration snapshots (`marketData`, `compBench`, `hris`) driven by `externalData.requests` on the current node.
+      - **Evidence Board** (`evidence_board`): a small notes area backed by local storage (`ti_tools_notes_{scenarioId}`) where users capture hypotheses, caveats, and links. On save, it emits a `tool_used` event with basic metrics (note length, word count, presence of links).
+- **Signals & events**:
+  - All meaningful tool actions call a shared `handleToolEvent` helper in the React app.
+    - Input: `{ toolId, kind, scenarioId?, nodeId?, metaEffects?, inputs?, noteLength?, noteWordCount?, hasLinks? }`.
+    - Behaviour:
+      - Applies `metaEffects` (when present) via the existing `applyEffectsToMeta` helper and persists the updated `meta` in the profile document.
+      - Emits a `tool_used` event through `logEvent` with:
+        - `scenarioId`, `nodeId`, `toolId`, `kind`, `inputs`, `metaBefore`, `metaAfter`, `noteLength`, `noteWordCount`, `hasLinks`.
+        - `tenantId` and `experiments` included through the extended `logEvent(..., context)` signature, reusing the Workstream K experimentation helpers.
+  - **No changes** are made to the Workstream C competency or label schemas in this iteration; instead, tool behaviour is observable via events and meta changes only.
+  - Future Workstream C/E iterations can:
+    - Map specific `tool_used` patterns (e.g. consistent headcount modelling plus evidence notes) into `competencyDeltas` or additional analytics views.
+    - Optionally extend `TOOL_DEFINITIONS` with competency/linkage metadata without changing the core schemas.
+﻿
 #### Workstream K – Experimentation, A/B Testing & Content Calibration
 
 - **Goal**
