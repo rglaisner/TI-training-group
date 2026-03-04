@@ -63,19 +63,953 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import { getFirestore, doc, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import {
+            getFirestore,
+            doc,
+            setDoc,
+            getDoc,
+            collection,
+            getDocs,
+            serverTimestamp
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         const config = JSON.parse(window.__firebase_config);
         const app = initializeApp(config);
         const auth = getAuth(app);
         const db = getFirestore(app);
 
-        window.fb = { auth, db, doc, setDoc, getDoc, signInAnonymously, onAuthStateChanged };
+        window.fb = {
+            auth,
+            db,
+            doc,
+            setDoc,
+            getDoc,
+            collection,
+            getDocs,
+            serverTimestamp,
+            signInAnonymously,
+            onAuthStateChanged
+        };
     </script>
 
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
         const apiKey = "";
+
+        // COMPETENCY, MODULE, PERSONA & LABEL MODEL
+        const COMPETENCIES = [
+            {
+                id: "ti_foundations",
+                label: "TI Mandate & Foundations",
+                domain: "Talent Intelligence",
+                description: "Defines the TI mandate, unifies internal and external data, and articulates value to senior stakeholders.",
+                tags: ["BEST PRACTICE", "STRATEGIC", "STRATEGY"]
+            },
+            {
+                id: "data_integrity_ethics",
+                label: "Data Integrity & Ethics",
+                domain: "People Analytics",
+                description: "Protects data quality and applies ethical judgment under pressure.",
+                tags: ["INTEGRITY", "ETHICS", "RISK"]
+            },
+            {
+                id: "stakeholder_influence",
+                label: "Stakeholder Influence & Storytelling",
+                domain: "Talent Intelligence",
+                description: "Aligns and persuades senior stakeholders through clear, evidence-based narratives.",
+                tags: ["INFLUENCE", "PARTNERSHIP", "STAKEHOLDER_MANAGEMENT", "EXECUTIVE_READY", "NARRATIVE"]
+            },
+            {
+                id: "squad_leadership",
+                label: "Squad Leadership & Collaboration",
+                domain: "Workforce Planning",
+                description: "Leads TI squads, creates psychological safety, and co-creates strategic options.",
+                tags: ["TEAM_LEADERSHIP", "PSYCHOLOGICAL_SAFETY", "COURSE_CORRECTION", "OPTIONALITY", "SEEKING_WISDOM"]
+            },
+            {
+                id: "enablement_delivery",
+                label: "Enablement & Operational Delivery",
+                domain: "Talent Intelligence",
+                description: "Builds practical tools and battlecards that change frontline behaviour.",
+                tags: ["ENABLEMENT"]
+            }
+        ];
+
+        const buildTagToCompetencyMap = (competencies) => {
+            const map = {};
+            competencies.forEach((competency) => {
+                (competency.tags || []).forEach((tag) => {
+                    if (!tag) {
+                        return;
+                    }
+                    if (!map[tag]) {
+                        map[tag] = [];
+                    }
+                    if (!map[tag].includes(competency.id)) {
+                        map[tag].push(competency.id);
+                    }
+                });
+            });
+            return map;
+        };
+
+        const TAG_TO_COMPETENCY_IDS = buildTagToCompetencyMap(COMPETENCIES);
+        const KNOWN_COMPETENCY_TAGS = Object.keys(TAG_TO_COMPETENCY_IDS);
+        const KNOWN_COMPETENCY_TAG_SET = new Set(KNOWN_COMPETENCY_TAGS);
+
+        const getCompetencyIdsForTag = (tag) => {
+            if (!tag) {
+                return [];
+            }
+            return TAG_TO_COMPETENCY_IDS[tag] || [];
+        };
+
+        const getCompetencySummaries = (evidence) => {
+            if (!evidence) {
+                return [];
+            }
+            return Object.keys(evidence).map((id) => {
+                const entry = evidence[id] || {};
+                return {
+                    id,
+                    count: typeof entry.count === "number" ? entry.count : 0
+                };
+            }).filter((entry) => entry.count > 0);
+        };
+
+        const updateCompetencyEvidence = (previousEvidence, scenarioId, decisions) => {
+            const base = previousEvidence || {};
+            const next = { ...base };
+            if (!Array.isArray(decisions) || decisions.length === 0) {
+                return next;
+            }
+            const timestamp = new Date().toISOString();
+            decisions.forEach((decision) => {
+                if (!decision || !decision.tag) {
+                    return;
+                }
+                const competencyIds = getCompetencyIdsForTag(decision.tag);
+                if (!Array.isArray(competencyIds) || competencyIds.length === 0) {
+                    return;
+                }
+                competencyIds.forEach((competencyId) => {
+                    const current = next[competencyId] || { count: 0, lastUpdated: null, lastScenarioId: null };
+                    next[competencyId] = {
+                        count: current.count + 1,
+                        lastUpdated: timestamp,
+                        lastScenarioId: scenarioId
+                    };
+                });
+            });
+            return next;
+        };
+
+        const SDL_SCHEMA_VERSION = 1;
+
+        const MODULES = [
+            { id: "core_simulation", name: "Core Simulation Engine", description: "Branching TI scenarios with XP and history.", defaultEnabled: true },
+            { id: "mentor_persona", name: "Mentor Persona", description: "Gemini-powered mentor evaluations after key decisions.", defaultEnabled: true },
+            { id: "voice_overlay", name: "Voice Overlay", description: "Text-to-speech narration of pivotal scenes.", defaultEnabled: true },
+            { id: "team_mode", name: "Virtual Team Mode", description: "Simulations that include virtual team members and a boss persona.", defaultEnabled: false }
+        ];
+
+        // WORKSTREAM K – EXPERIMENTATION (data-driven configuration)
+        const EXPERIMENTS = [
+            {
+                id: "exp_scenario_vt1_difficulty",
+                label: "VT1 Difficulty Curve Calibration",
+                description: "Compare baseline vs slightly harder VT1 scenario variants to calibrate difficulty.",
+                kind: "scenario_variant",
+                targetScenarioIds: ["vt1"],
+                variants: [
+                    { id: "control", label: "Baseline content", weight: 1 },
+                    { id: "treatment_a", label: "Adjusted difficulty curve", weight: 1 }
+                ],
+                assignment: {
+                    unit: "user"
+                }
+            },
+            {
+                id: "exp_persona_mentor_tone",
+                label: "Mentor Persona Tone",
+                description: "Compare baseline vs more direct mentor persona tone for feedback.",
+                kind: "persona_prompt",
+                targetPersonaIds: ["mentor"],
+                variants: [
+                    { id: "baseline", label: "Baseline mentor tone", weight: 1 },
+                    { id: "direct", label: "More direct / challenging tone", weight: 1 }
+                ],
+                assignment: {
+                    unit: "tenant"
+                }
+            }
+        ];
+
+        const PERSONAS = [
+            {
+                id: "mentor",
+                label: "Senior TI Mentor",
+                role: "External advisor",
+                tone: "sharp, concise, supportive",
+                perspective: "global talent intelligence and people analytics"
+            },
+            {
+                id: "boss",
+                label: "TI Leader / Boss",
+                role: "Head of Talent Intelligence",
+                tone: "direct, expectation-setting, outcome-focused",
+                perspective: "organisational delivery, stakeholder management, political reality"
+            },
+            {
+                id: "peer",
+                label: "TI Peer",
+                role: "Colleague in TI team",
+                tone: "collaborative, practical, experiments-oriented",
+                perspective: "messy data, experimentation, trade-offs"
+            }
+        ];
+
+        const ADMIN_STORAGE_KEY_V1 = "ti_admin_config_v1";
+        const ADMIN_STORAGE_KEY_V2 = "ti_admin_config_v2";
+        const CUSTOM_SCENARIOS_STORAGE_KEY = "ti_custom_scenarios_v1";
+        const DEFAULT_TENANT_ID = "default";
+
+        const hashStringToUnitInterval = (input) => {
+            if (typeof input !== "string" || input.length === 0) {
+                return 0.5;
+            }
+            let hash = 0;
+            for (let index = 0; index < input.length; index += 1) {
+                hash = (hash * 31 + input.charCodeAt(index)) >>> 0;
+            }
+            const normalised = hash % 10000;
+            return normalised / 10000;
+        };
+
+        const selectVariantForExperiment = (experiment, unitKey) => {
+            const safeExperiment = experiment || {};
+            const variants = Array.isArray(safeExperiment.variants) && safeExperiment.variants.length > 0
+                ? safeExperiment.variants
+                : [{ id: "control", label: "Control" }];
+
+            const randomValue = hashStringToUnitInterval(`${safeExperiment.id || "exp"}::${unitKey || "unit"}`);
+
+            const totalWeight = variants.reduce((sum, variant) => {
+                const weight = typeof variant.weight === "number" && variant.weight > 0 ? variant.weight : 1;
+                return sum + weight;
+            }, 0);
+
+            if (totalWeight <= 0) {
+                return variants[0].id;
+            }
+
+            let threshold = randomValue * totalWeight;
+            for (let index = 0; index < variants.length; index += 1) {
+                const variant = variants[index];
+                const weight = typeof variant.weight === "number" && variant.weight > 0 ? variant.weight : 1;
+                if (threshold <= weight) {
+                    return variant.id;
+                }
+                threshold -= weight;
+            }
+
+            return variants[variants.length - 1].id;
+        };
+
+        const getActiveExperimentsForContext = (params) => {
+            const safeParams = params && typeof params === "object" ? params : {};
+            const tenantConfig = safeParams.tenantConfig || {};
+            const userId = safeParams.userId || null;
+            const tenantId = safeParams.tenantId || DEFAULT_TENANT_ID;
+            const scenarioId = safeParams.scenarioId || null;
+
+            const optInIds = Array.isArray(tenantConfig.experimentOptInIds)
+                ? tenantConfig.experimentOptInIds
+                : [];
+            if (!Array.isArray(EXPERIMENTS) || EXPERIMENTS.length === 0 || optInIds.length === 0) {
+                return {};
+            }
+
+            const optInSet = new Set(optInIds);
+            const assignments = {};
+
+            EXPERIMENTS.forEach((experiment) => {
+                if (!experiment || typeof experiment.id !== "string") {
+                    return;
+                }
+                if (!optInSet.has(experiment.id)) {
+                    return;
+                }
+
+                const kind = experiment.kind;
+
+                if (kind === "scenario_variant" && scenarioId) {
+                    const targets = Array.isArray(experiment.targetScenarioIds)
+                        ? experiment.targetScenarioIds
+                        : [];
+                    if (!targets.includes(scenarioId)) {
+                        return;
+                    }
+                }
+
+                const assignmentConfig = experiment.assignment || {};
+                const unit = assignmentConfig.unit === "tenant" ? "tenant" : "user";
+                const unitKey = unit === "tenant"
+                    ? `tenant:${tenantId || DEFAULT_TENANT_ID}`
+                    : `user:${userId || "anonymous"}`;
+
+                const variantId = selectVariantForExperiment(experiment, unitKey);
+                if (!variantId) {
+                    return;
+                }
+
+                assignments[experiment.id] = variantId;
+            });
+
+            return assignments;
+        };
+
+        const createDefaultTenantConfig = (overrides = {}) => {
+            const baseModules = MODULES.reduce((acc, moduleDef) => {
+                acc[moduleDef.id] = moduleDef.defaultEnabled;
+                return acc;
+            }, {});
+
+            return {
+                label: overrides.label || "Global Default",
+                description: overrides.description || "Baseline configuration for all participants.",
+                modules: {
+                    ...baseModules,
+                    ...(overrides.modules || {})
+                },
+                enabledScenarioIds: Array.isArray(overrides.enabledScenarioIds) ? overrides.enabledScenarioIds : null,
+                activePersonaId: overrides.activePersonaId || "mentor",
+                experimentOptInIds: Array.isArray(overrides.experimentOptInIds) ? overrides.experimentOptInIds : []
+            };
+        };
+
+        const createDefaultAdminState = () => ({
+            activeTenantId: DEFAULT_TENANT_ID,
+            tenants: {
+                [DEFAULT_TENANT_ID]: createDefaultTenantConfig()
+            }
+        });
+
+        const getTenantConfig = (adminState) => {
+            if (!adminState) {
+                return createDefaultTenantConfig();
+            }
+
+            const tenantId = adminState.activeTenantId || DEFAULT_TENANT_ID;
+            const tenants = adminState.tenants || {};
+            const existingConfig = tenants[tenantId] || {};
+
+            return createDefaultTenantConfig(existingConfig);
+        };
+
+        const loadAdminConfig = () => {
+            try {
+                const storedV2 = window.localStorage.getItem(ADMIN_STORAGE_KEY_V2);
+                if (storedV2) {
+                    const parsed = JSON.parse(storedV2);
+                    const defaultState = createDefaultAdminState();
+                    return {
+                        ...defaultState,
+                        ...parsed,
+                        tenants: {
+                            ...defaultState.tenants,
+                            ...(parsed.tenants || {})
+                        }
+                    };
+                }
+
+                const legacy = window.localStorage.getItem(ADMIN_STORAGE_KEY_V1);
+                if (legacy) {
+                    const parsedLegacy = JSON.parse(legacy);
+                    const tenantFromLegacy = createDefaultTenantConfig(parsedLegacy);
+                    return {
+                        activeTenantId: DEFAULT_TENANT_ID,
+                        tenants: { [DEFAULT_TENANT_ID]: tenantFromLegacy }
+                    };
+                }
+            } catch (error) {
+                // fall through to default
+            }
+
+            return createDefaultAdminState();
+        };
+
+        const saveAdminConfig = (config) => {
+            try {
+                window.localStorage.setItem(ADMIN_STORAGE_KEY_V2, JSON.stringify(config));
+            } catch (error) {
+                // ignore storage issues
+            }
+        };
+
+        const getActivePersona = (config) => {
+            const tenantConfig = getTenantConfig(config);
+            const fallback = PERSONAS[0];
+            const match = PERSONAS.find((p) => p.id === tenantConfig.activePersonaId);
+            return match || fallback;
+        };
+
+        const logEvent = async (userId, type, payload, context) => {
+            if (!userId || !window.fb || !window.fb.db) {
+                return;
+            }
+            try {
+                const nowIso = new Date().toISOString();
+                const safePayload = payload && typeof payload === "object" ? payload : {};
+                const safeContext = context && typeof context === "object" ? context : {};
+
+                const baseDoc = {
+                    type,
+                    appId: window.__app_id,
+                    userId,
+                    createdAt: typeof window.fb.serverTimestamp === "function"
+                        ? window.fb.serverTimestamp()
+                        : nowIso,
+                    clientTime: nowIso,
+                    version: 1,
+                    payload: safePayload
+                };
+
+                const scenarioId = safePayload.scenarioId || null;
+                const nodeId = safePayload.nodeId || null;
+                const choiceId = safePayload.choiceId || null;
+                const personaId = safePayload.personaId || null;
+                const labelsBefore = Array.isArray(safePayload.labelsBefore) ? safePayload.labelsBefore : null;
+                const labelsAfter = Array.isArray(safePayload.labelsAfter) ? safePayload.labelsAfter : null;
+                const xpBefore = typeof safePayload.xpBefore === "number" ? safePayload.xpBefore : null;
+                const xpAfter = typeof safePayload.xpAfter === "number" ? safePayload.xpAfter : null;
+                const competencyDeltas = safePayload.competencyDeltas && typeof safePayload.competencyDeltas === "object"
+                    ? safePayload.competencyDeltas
+                    : null;
+                const scenarioTags = Array.isArray(safePayload.scenarioTags) ? safePayload.scenarioTags : null;
+                const tenantId = typeof safeContext.tenantId === "string" && safeContext.tenantId
+                    ? safeContext.tenantId
+                    : null;
+                const experiments = safeContext.experiments && typeof safeContext.experiments === "object"
+                    ? safeContext.experiments
+                    : null;
+
+                if (scenarioId) baseDoc.scenarioId = scenarioId;
+                if (nodeId) baseDoc.nodeId = nodeId;
+                if (choiceId) baseDoc.choiceId = choiceId;
+                if (personaId) baseDoc.personaId = personaId;
+                if (labelsBefore) baseDoc.labelsBefore = labelsBefore;
+                if (labelsAfter) baseDoc.labelsAfter = labelsAfter;
+                if (xpBefore !== null) baseDoc.xpBefore = xpBefore;
+                if (xpAfter !== null) baseDoc.xpAfter = xpAfter;
+                if (competencyDeltas) baseDoc.competencyDeltas = competencyDeltas;
+                if (scenarioTags) baseDoc.scenarioTags = scenarioTags;
+                if (tenantId) baseDoc.tenantId = tenantId;
+                if (experiments && Object.keys(experiments).length > 0) baseDoc.experiments = experiments;
+
+                await window.fb.setDoc(
+                    window.fb.doc(window.fb.db, "events", window.__app_id, "users", userId, nowIso),
+                    baseDoc
+                );
+            } catch (error) {
+                // best-effort only
+            }
+        };
+
+        const computeLabels = (xp, completedCount, competencyEvidence) => {
+            const labels = [];
+            const evidenceEntries = competencyEvidence ? Object.values(competencyEvidence) : [];
+            const evidenceCoverage = evidenceEntries.length;
+            const totalEvidenceCount = evidenceEntries.reduce((acc, entry) => {
+                const count = entry && typeof entry.count === "number" ? entry.count : 0;
+                return acc + count;
+            }, 0);
+            const hasEvidence = evidenceCoverage > 0 && totalEvidenceCount > 0;
+
+            const meetsAnalyst = xp >= 200 && completedCount >= 2;
+            const meetsStrategist = xp >= 800 && completedCount >= 5;
+            const meetsArchitect = xp >= 2000 && completedCount >= 8;
+
+            if (meetsAnalyst) {
+                const explanation = hasEvidence
+                    ? `You have completed ${completedCount} missions with ${xp} XP and demonstrated evidence in ${evidenceCoverage} competency area${evidenceCoverage === 1 ? "" : "s"}.`
+                    : `You have completed ${completedCount} missions with ${xp} XP. Competency evidence will accumulate as you play new missions in this version of the console.`;
+                const nextSteps = hasEvidence
+                    ? "Play missions that expose you to new competencies (for example ethics, stakeholder influence, or squad leadership) to broaden your coverage."
+                    : "Replay missions or try new ones to start building competency evidence that goes beyond XP alone.";
+                labels.push({
+                    id: "ti_analyst",
+                    name: "TI Analyst · Verified",
+                    tier: 1,
+                    explanation,
+                    nextSteps
+                });
+            }
+
+            if (meetsStrategist) {
+                if (hasEvidence && evidenceCoverage >= 3) {
+                    const explanation = `You have strong XP (${xp}) and breadth across at least three competency areas, indicating you can apply TI skills in varied situations.`;
+                    const nextSteps = "To progress further, focus on missions that test leadership, ethics, and executive storytelling under pressure.";
+                    labels.push({
+                        id: "ti_strategist",
+                        name: "TI Strategist · Trusted",
+                        tier: 2,
+                        explanation,
+                        nextSteps
+                    });
+                } else if (!hasEvidence) {
+                    labels.push({
+                        id: "ti_strategist",
+                        name: "TI Strategist · Trusted",
+                        tier: 2,
+                        explanation: "You have met the XP and mission breadth thresholds for Strategist, but competency evidence is not yet tracked for this profile.",
+                        nextSteps: "Play new missions in this version of the console to start building competency evidence."
+                    });
+                }
+            }
+
+            if (meetsArchitect) {
+                if (hasEvidence && evidenceCoverage >= 4 && totalEvidenceCount >= 10) {
+                    const explanation = `You maintain high XP (${xp}) with repeated evidence across multiple competencies, signalling consistent excellence in TI practice.`;
+                    const nextSteps = "Use multi-mission arcs and more complex scenarios to stress-test your decisions and maintain this label over time.";
+                    labels.push({
+                        id: "ti_architect",
+                        name: "TI Architect · Excellence",
+                        tier: 3,
+                        explanation,
+                        nextSteps
+                    });
+                } else if (!hasEvidence) {
+                    labels.push({
+                        id: "ti_architect",
+                        name: "TI Architect · Excellence",
+                        tier: 3,
+                        explanation: "You have met the XP and mission breadth thresholds for Architect, but competency evidence is not yet tracked for this profile.",
+                        nextSteps: "Play new missions in this version of the console to start building competency evidence."
+                    });
+                }
+            }
+
+            labels.sort((a, b) => b.tier - a.tier);
+            return labels;
+        };
+
+        const DEFAULT_META = {
+            timelineWeek: 0,
+            orgRisk: 20,
+            personaTrust: {
+                mentor: 0,
+                boss: 0,
+                peer: 0
+            }
+        };
+
+        const createMeta = (source) => {
+            const base = DEFAULT_META;
+            const input = source || {};
+            const personaTrust = input.personaTrust || {};
+
+            return {
+                timelineWeek: typeof input.timelineWeek === "number" ? input.timelineWeek : base.timelineWeek,
+                orgRisk: typeof input.orgRisk === "number" ? input.orgRisk : base.orgRisk,
+                personaTrust: {
+                    mentor: typeof personaTrust.mentor === "number" ? personaTrust.mentor : base.personaTrust.mentor,
+                    boss: typeof personaTrust.boss === "number" ? personaTrust.boss : base.personaTrust.boss,
+                    peer: typeof personaTrust.peer === "number" ? personaTrust.peer : base.personaTrust.peer
+                }
+            };
+        };
+
+        const clamp = (value, min, max) => {
+            const safe = typeof value === "number" ? value : 0;
+            return Math.min(max, Math.max(min, safe));
+        };
+
+        const applyEffectsToMeta = (meta, effects) => {
+            if (!effects) return meta;
+
+            const base = meta || createMeta();
+            const next = {
+                ...base,
+                personaTrust: { ...base.personaTrust }
+            };
+
+            if (typeof effects.advanceWeeks === "number") {
+                next.timelineWeek += effects.advanceWeeks;
+            }
+
+            if (typeof effects.orgRiskDelta === "number") {
+                next.orgRisk = clamp((next.orgRisk || 0) + effects.orgRiskDelta, 0, 100);
+            }
+
+            if (Array.isArray(effects.personaTrustDeltas)) {
+                effects.personaTrustDeltas.forEach((entry) => {
+                    if (!entry || typeof entry.personaId !== "string" || typeof entry.delta !== "number") {
+                        return;
+                    }
+                    const current = typeof next.personaTrust[entry.personaId] === "number"
+                        ? next.personaTrust[entry.personaId]
+                        : 0;
+                    next.personaTrust[entry.personaId] = clamp(current + entry.delta, -100, 100);
+                });
+            }
+
+            return next;
+        };
+
+        const mergeProfileData = (raw) => {
+            if (!raw || typeof raw !== "object") {
+                return { xp: 0, completed: {}, meta: createMeta(), competencyEvidence: {} };
+            }
+
+            const xp = typeof raw.xp === "number" ? raw.xp : 0;
+            const completed = raw.completed && typeof raw.completed === "object" ? raw.completed : {};
+            const meta = createMeta(raw.meta);
+            const competencyEvidence = raw.competencyEvidence && typeof raw.competencyEvidence === "object"
+                ? raw.competencyEvidence
+                : {};
+
+            return { xp, completed, meta, competencyEvidence };
+        };
+
+        const getVisibleScenarios = (adminState, scenarios) => {
+            const tenantConfig = getTenantConfig(adminState);
+            const enabledIds = tenantConfig.enabledScenarioIds;
+            const source = Array.isArray(scenarios) && scenarios.length > 0 ? scenarios : SCENARIOS;
+
+            if (!Array.isArray(enabledIds) || enabledIds.length === 0) {
+                return source.filter((scenario) => {
+                    if (scenario.requiresModuleId && !tenantConfig.modules?.[scenario.requiresModuleId]) {
+                        return false;
+                    }
+                    return true;
+                });
+            }
+
+            const activeIds = new Set(enabledIds);
+            return source.filter((scenario) => {
+                if (scenario.requiresModuleId && !tenantConfig.modules?.[scenario.requiresModuleId]) {
+                    return false;
+                }
+                return activeIds.has(scenario.id);
+            });
+        };
+
+        const getPersonaFeedbackHeading = (personaId) => {
+            if (personaId === "boss") return "BOSS_FEEDBACK";
+            if (personaId === "peer") return "PEER_FEEDBACK";
+            if (personaId === "mentor") return "MENTOR_EVALUATION";
+            return "PERSONA_FEEDBACK";
+        };
+
+        const formatDecisionHistoryForPrompt = (history) => {
+            if (!Array.isArray(history) || history.length === 0) {
+                return "No prior decisions in this mission.";
+            }
+
+            const steps = history.map((entry, index) => {
+                const tagPart = entry.tag ? ` [${entry.tag}]` : "";
+                return `Step ${index + 1}: "${entry.choice}"${tagPart}`;
+            });
+
+            return steps.join("\n");
+        };
+
+        const formatProfileSummaryForPrompt = (gameState, scenarios) => {
+            const totalXp = gameState?.xp || 0;
+            const completedIds = Object.keys(gameState?.completed || {});
+
+            if (completedIds.length === 0) {
+                return `Total XP: ${totalXp}. No completed missions yet.`;
+            }
+
+            const source = Array.isArray(scenarios) && scenarios.length > 0 ? scenarios : SCENARIOS;
+
+            const completedTitles = source
+                .filter((scenario) => completedIds.includes(scenario.id))
+                .map((scenario) => `- ${scenario.title} (${scenario.id})`);
+
+            return `Total XP: ${totalXp}.\nCompleted missions:\n${completedTitles.join("\n")}`;
+        };
+
+        // EXTERNAL DATA & INTEGRATION LAYER
+        const INTEGRATION_MODE_DEMO = "demo";
+        const INTEGRATION_MODE_LIVE = "live";
+
+        const getIntegrationConfig = () => {
+            const baseConfig = {
+                mode: INTEGRATION_MODE_DEMO,
+                marketData: null,
+                compBench: null,
+                hris: null
+            };
+
+            try {
+                const source = typeof window !== "undefined" ? window.__ti_integrations : null;
+                if (!source || typeof source !== "object") {
+                    return baseConfig;
+                }
+
+                const mode = source.mode === INTEGRATION_MODE_LIVE
+                    ? INTEGRATION_MODE_LIVE
+                    : INTEGRATION_MODE_DEMO;
+
+                return {
+                    mode,
+                    marketData: source.marketData && typeof source.marketData === "object" ? source.marketData : null,
+                    compBench: source.compBench && typeof source.compBench === "object" ? source.compBench : null,
+                    hris: source.hris && typeof source.hris === "object" ? source.hris : null
+                };
+            } catch (error) {
+                return baseConfig;
+            }
+        };
+
+        const DEMO_MARKET_SNAPSHOTS = {
+            vt1_berlin_amsterdam: {
+                title: "Berlin vs Amsterdam – Data Hub Feasibility",
+                source: "Deterministic demo snapshot",
+                narrative: "Berlin offers a deeper data talent pool but at higher competition and cost; Amsterdam is smaller but more stable with lower risk of overheating.",
+                comparison: [
+                    {
+                        location: "Berlin",
+                        estimatedTalentPool: 5200,
+                        medianSalaryIndex: 1.0,
+                        competitionIndex: 0.87,
+                        note: "Deep pool, but overheated compared to historic norms."
+                    },
+                    {
+                        location: "Amsterdam",
+                        estimatedTalentPool: 2600,
+                        medianSalaryIndex: 0.94,
+                        competitionIndex: 0.62,
+                        note: "Smaller pool, but steadier conversion and lower risk of overheating."
+                    }
+                ]
+            }
+        };
+
+        const DEMO_COMP_BENCHMARKS = {
+            s1_senior_backend_gap: {
+                title: "Senior Backend Engineer – Market vs Internal",
+                source: "Deterministic demo snapshot",
+                narrative: "External benchmarks suggest your current range is 10–15% below the market median for senior backend engineers.",
+                internal: {
+                    medianBase: 65000,
+                    currency: "GBP"
+                },
+                market: {
+                    medianBase: 74000,
+                    percentile75: 82000,
+                    currency: "GBP"
+                }
+            }
+        };
+
+        const DEMO_HRIS_SNAPSHOTS = {
+            s2_cost_per_hire_pack: {
+                title: "Cost-per-Hire – Board Pack View",
+                source: "Deterministic demo snapshot",
+                narrative: "Internal HRIS data shows a structurally higher cost-per-hire than the CEO’s requested figure, driven by agency usage and extended time-to-fill.",
+                metrics: {
+                    reportedCostPerHire: 8200,
+                    validatedCostPerHire: 9600,
+                    agencyUsageRate: 0.46,
+                    averageTimeToFillDays: 67
+                }
+            },
+            s5_screening_bias_funnel: {
+                title: "Screening Funnel – DEI View",
+                source: "Deterministic demo snapshot",
+                narrative: "HRIS funnel data confirms a 2.3x drop-off rate for diverse candidates at the recruiter screen stage, with no equivalent drop at later stages.",
+                funnel: {
+                    stage: "Recruiter Screen",
+                    biasRatio: 2.3,
+                    affectedGroup: "Diverse candidates",
+                    sampleSize: 1200
+                }
+            },
+            s11_function_setup_internal_signals: {
+                title: "Function Setup – Internal Talent Signals",
+                source: "Deterministic demo snapshot",
+                narrative: "Internal HRIS and ATS data show rising regretted attrition in key teams and an unreviewed backlog of senior requisitions.",
+                summary: {
+                    regrettedAttritionRate: 0.19,
+                    openSeniorReqs: 27,
+                    staleReqsOver60Days: 9
+                }
+            }
+        };
+
+        const createMarketDataService = (integrationConfig) => {
+            const mode = integrationConfig.mode;
+
+            const getLocationComparison = async (request, context) => {
+                const key = request && typeof request.key === "string"
+                    ? request.key
+                    : "vt1_berlin_amsterdam";
+                const snapshot = DEMO_MARKET_SNAPSHOTS[key] || DEMO_MARKET_SNAPSHOTS.vt1_berlin_amsterdam;
+                const safeContext = context && typeof context === "object" ? context : {};
+                const userId = safeContext.userId || null;
+                const scenarioId = safeContext.scenarioId || null;
+                const nodeId = safeContext.nodeId || null;
+
+                if (userId) {
+                    await logEvent(userId, "integration_request", {
+                        scenarioId,
+                        nodeId,
+                        service: "market_data",
+                        operation: "getLocationComparison",
+                        modeRequested: mode,
+                        key
+                    });
+                }
+
+                const modeUsed = mode === INTEGRATION_MODE_LIVE && integrationConfig.marketData
+                    ? INTEGRATION_MODE_LIVE
+                    : INTEGRATION_MODE_DEMO;
+
+                const result = {
+                    service: "market_data",
+                    operation: "getLocationComparison",
+                    modeUsed,
+                    key,
+                    snapshot
+                };
+
+                if (userId) {
+                    await logEvent(userId, "integration_result", {
+                        scenarioId,
+                        nodeId,
+                        service: "market_data",
+                        operation: "getLocationComparison",
+                        modeUsed,
+                        key
+                    });
+                }
+
+                return result;
+            };
+
+            return {
+                getLocationComparison
+            };
+        };
+
+        const createCompBenchService = (integrationConfig) => {
+            const mode = integrationConfig.mode;
+
+            const getRoleCompSnapshot = async (request, context) => {
+                const key = request && typeof request.key === "string"
+                    ? request.key
+                    : "s1_senior_backend_gap";
+                const snapshot = DEMO_COMP_BENCHMARKS[key] || DEMO_COMP_BENCHMARKS.s1_senior_backend_gap;
+                const safeContext = context && typeof context === "object" ? context : {};
+                const userId = safeContext.userId || null;
+                const scenarioId = safeContext.scenarioId || null;
+                const nodeId = safeContext.nodeId || null;
+
+                if (userId) {
+                    await logEvent(userId, "integration_request", {
+                        scenarioId,
+                        nodeId,
+                        service: "comp_bench",
+                        operation: "getRoleCompSnapshot",
+                        modeRequested: mode,
+                        key
+                    });
+                }
+
+                const modeUsed = mode === INTEGRATION_MODE_LIVE && integrationConfig.compBench
+                    ? INTEGRATION_MODE_LIVE
+                    : INTEGRATION_MODE_DEMO;
+
+                const result = {
+                    service: "comp_bench",
+                    operation: "getRoleCompSnapshot",
+                    modeUsed,
+                    key,
+                    snapshot
+                };
+
+                if (userId) {
+                    await logEvent(userId, "integration_result", {
+                        scenarioId,
+                        nodeId,
+                        service: "comp_bench",
+                        operation: "getRoleCompSnapshot",
+                        modeUsed,
+                        key
+                    });
+                }
+
+                return result;
+            };
+
+            return {
+                getRoleCompSnapshot
+            };
+        };
+
+        const createHrisService = (integrationConfig) => {
+            const mode = integrationConfig.mode;
+
+            const getSnapshot = async (request, context) => {
+                const key = request && typeof request.key === "string"
+                    ? request.key
+                    : "s2_cost_per_hire_pack";
+                const snapshot = DEMO_HRIS_SNAPSHOTS[key] || DEMO_HRIS_SNAPSHOTS.s2_cost_per_hire_pack;
+                const safeContext = context && typeof context === "object" ? context : {};
+                const userId = safeContext.userId || null;
+                const scenarioId = safeContext.scenarioId || null;
+                const nodeId = safeContext.nodeId || null;
+
+                if (userId) {
+                    await logEvent(userId, "integration_request", {
+                        scenarioId,
+                        nodeId,
+                        service: "hris",
+                        operation: "getSnapshot",
+                        modeRequested: mode,
+                        key
+                    });
+                }
+
+                const modeUsed = mode === INTEGRATION_MODE_LIVE && integrationConfig.hris
+                    ? INTEGRATION_MODE_LIVE
+                    : INTEGRATION_MODE_DEMO;
+
+                const result = {
+                    service: "hris",
+                    operation: "getSnapshot",
+                    modeUsed,
+                    key,
+                    snapshot
+                };
+
+                if (userId) {
+                    await logEvent(userId, "integration_result", {
+                        scenarioId,
+                        nodeId,
+                        service: "hris",
+                        operation: "getSnapshot",
+                        modeUsed,
+                        key
+                    });
+                }
+
+                return result;
+            };
+
+            return {
+                getSnapshot
+            };
+        };
+
+        const INTEGRATION_CONFIG = getIntegrationConfig();
+        const marketDataService = createMarketDataService(INTEGRATION_CONFIG);
+        const compBenchService = createCompBenchService(INTEGRATION_CONFIG);
+        const hrisService = createHrisService(INTEGRATION_CONFIG);
 
         const SCENARIOS = [
             {
@@ -115,22 +1049,382 @@
                     },
                     scoped: {
                         scene: "CHRO: 'Both. Check the data.' You have 60 minutes.",
+                        externalData: {
+                            requests: [
+                                {
+                                    id: "s1_comp_gap",
+                                    service: "compBench",
+                                    operation: "getRoleCompSnapshot",
+                                    key: "s1_senior_backend_gap",
+                                    params: {
+                                        role: "Senior Backend Engineer",
+                                        location: "Primary Engineering Hub"
+                                    }
+                                }
+                            ]
+                        },
                         choices: [{ text: "Use real-time benchmarking (Lightcast) + ATS decline reasons.", next: "final", xp: 30, tag: "BEST PRACTICE" }]
                     },
                     data_rush: { scene: "You have numbers, but no story. The CHRO asks for a recommendation.", choices: [{ text: "Pivot to comp benchmarking.", next: "final", xp: 10 }] },
                     final: { scene: "Analysis complete. You identified a 12% comp gap.", isEnd: true }
                 }
             },
-            { id: "s2", title: "THE BOARD DECK", subtitle: "Data Integrity", difficulty: "LEVEL 4 · SENIOR", accent: "#facc15", brief: "Quarterly board pack preparation. Conflict discovered 2 hours before submission.", nodes: { start: { scene: "CEO wants inflated numbers. CFO expects accuracy. You found a discrepancy in Cost-per-Hire.", choices: [{ text: "Flag discrepancy and use the correct figure.", next: "final", xp: 40, tag: "INTEGRITY" }, { text: "Use the inflated number as requested.", next: "final", xp: 0, tag: "RISK" }] }, final: { scene: "Submission complete.", isEnd: true } } },
+            {
+                id: "s2",
+                title: "THE BOARD DECK",
+                subtitle: "Data Integrity",
+                difficulty: "LEVEL 4 · SENIOR",
+                accent: "#facc15",
+                brief: "Quarterly board pack preparation. Conflict discovered 2 hours before submission.",
+                nodes: {
+                    start: {
+                        scene: "CEO wants inflated numbers. CFO expects accuracy. You found a discrepancy in Cost-per-Hire.",
+                        externalData: {
+                            requests: [
+                                {
+                                    id: "s2_cost_per_hire_pack",
+                                    service: "hris",
+                                    operation: "getSnapshot",
+                                    key: "s2_cost_per_hire_pack",
+                                    params: {
+                                        metric: "cost_per_hire",
+                                        windowMonths: 12
+                                    }
+                                }
+                            ]
+                        },
+                        choices: [
+                            { text: "Flag discrepancy and use the correct figure.", next: "final", xp: 40, tag: "INTEGRITY" },
+                            { text: "Use the inflated number as requested.", next: "final", xp: 0, tag: "RISK" }
+                        ]
+                    },
+                    final: { scene: "Submission complete.", isEnd: true }
+                }
+            },
             { id: "s3", title: "THE COMPETITIVE STORM", subtitle: "Crisis Intelligence", difficulty: "LEVEL 5 · LEAD", accent: "#f97316", brief: "Competitor announces a 500-person hiring surge. Crisis response required.", nodes: { start: { scene: "CEO asks: 'What does this mean for us?' You have 30 minutes to triage.", choices: [{ text: "Triage by Known vs. Unknown vs. Assumptions.", next: "final", xp: 35, tag: "BEST PRACTICE" }] }, final: { scene: "Strategic response delivered.", isEnd: true } } },
             { id: "s4", title: "THE FIVE-YEAR PLAN", subtitle: "Strategic Planning", difficulty: "LEVEL 4 · SENIOR", accent: "#38bdf8", brief: "Model future capability needs for a 5-year business transformation.", nodes: { start: { scene: "Transformation brief: shift from product to platform. How do you start?", choices: [{ text: "Map the capability delta first.", next: "final", xp: 35, tag: "STRATEGY" }] }, final: { scene: "Roadmap approved.", isEnd: true } } },
-            { id: "s5", title: "THE ETHICS LINE", subtitle: "DEI Analytics", difficulty: "LEVEL 5 · LEAD", accent: "#e879f9", brief: "Diversity analytics reveal screening bias. Stakeholders want to bury the findings.", nodes: { start: { scene: "Findings: 2.3x screening bias for diverse candidates. Legal is nervous.", choices: [{ text: "Maintain transparency with a structured improvement plan.", next: "final", xp: 40, tag: "ETHICS" }] }, final: { scene: "Ethics line held.", isEnd: true } } },
+            {
+                id: "s5",
+                title: "THE ETHICS LINE",
+                subtitle: "DEI Analytics",
+                difficulty: "LEVEL 5 · LEAD",
+                accent: "#e879f9",
+                brief: "Diversity analytics reveal screening bias. Stakeholders want to bury the findings.",
+                nodes: {
+                    start: {
+                        scene: "Findings: 2.3x screening bias for diverse candidates. Legal is nervous.",
+                        externalData: {
+                            requests: [
+                                {
+                                    id: "s5_screening_bias_funnel",
+                                    service: "hris",
+                                    operation: "getSnapshot",
+                                    key: "s5_screening_bias_funnel",
+                                    params: {
+                                        funnelStage: "Recruiter Screen",
+                                        dimension: "diversity"
+                                    }
+                                }
+                            ]
+                        },
+                        choices: [
+                            {
+                                text: "Maintain transparency with a structured improvement plan.",
+                                next: "final",
+                                xp: 40,
+                                tag: "ETHICS"
+                            }
+                        ]
+                    },
+                    final: { scene: "Ethics line held.", isEnd: true }
+                }
+            },
             { id: "s6", title: "THE AI RECKONING", subtitle: "Automation ROI", difficulty: "LEVEL 6 · DIRECTOR", accent: "#a78bfa", brief: "CPO wants to automate 30% of TA. Vendor claims don't match your pilot data.", nodes: { start: { scene: "CPO: 'Build the case for £2M savings via AI.' Your data shows £600k.", choices: [{ text: "Present the validated range honestly.", next: "final", xp: 40, tag: "INTEGRITY" }] }, final: { scene: "AI strategy recalibrated.", isEnd: true } } },
             { id: "s7", title: "BATTLECARD BRIEF", subtitle: "Competitive Intel", difficulty: "LEVEL 3 · SENIOR", accent: "#22d3ee", brief: "Create battlecards for recruiters losing candidates to competitors.", nodes: { start: { scene: "Head of TA: 'We need battlecards for TechCorp, ScaleUp, and FinTechCo.'", choices: [{ text: "Structure cards around recruiter decision moments.", next: "final", xp: 30, tag: "ENABLEMENT" }] }, final: { scene: "Battlecards deployed.", isEnd: true } } },
             { id: "s10", title: "PURPLE SQUIRREL", subtitle: "Impossible Brief", difficulty: "LEVEL 0 · SOURCER", accent: "#4ade80", brief: "Hiring manager Dan wants 15 ML engineers in Manchester at £65k. Market says no.", nodes: { start: { scene: "Brief received. Data check shows 31 active engineers at £97k median.", choices: [{ text: "Present the market brief to Dan before sourcing.", next: "final", xp: 30, tag: "BEST PRACTICE" }] }, final: { scene: "Brief recalibrated.", isEnd: true } } },
-            { id: "s11", title: "FIRST 90 DAYS", subtitle: "Function Setup", difficulty: "LEVEL 0 · ANALYST", accent: "#4ade80", brief: "Day 31. Leadership wants to see your value findings. You have partial data access.", nodes: { start: { scene: "Priya: 'Show them what TI can do.' Where do you start?", choices: [{ text: "Discovery calls with 5 key stakeholders first.", next: "final", xp: 28, tag: "STRATEGIC" }] }, final: { scene: "90-day review successful.", isEnd: true } } },
+            {
+                id: "s11",
+                title: "FIRST 90 DAYS",
+                subtitle: "Function Setup",
+                difficulty: "LEVEL 0 · ANALYST",
+                accent: "#4ade80",
+                brief: "Day 31. Leadership wants to see your value findings. You have partial data access.",
+                nodes: {
+                    start: {
+                        scene: "Priya: 'Show them what TI can do.' Where do you start?",
+                        externalData: {
+                            requests: [
+                                {
+                                    id: "s11_function_setup_internal_signals",
+                                    service: "hris",
+                                    operation: "getSnapshot",
+                                    key: "s11_function_setup_internal_signals",
+                                    params: {
+                                        focus: "early_warning_signals"
+                                    }
+                                }
+                            ]
+                        },
+                        choices: [
+                            {
+                                text: "Discovery calls with 5 key stakeholders first.",
+                                next: "final",
+                                xp: 28,
+                                tag: "STRATEGIC"
+                            }
+                        ]
+                    },
+                    final: { scene: "90-day review successful.", isEnd: true }
+                }
+            },
             { id: "s12", title: "CONVERSATION AFTER", subtitle: "Defending Data", difficulty: "LEVEL 2 · SENIOR", accent: "#facc15", brief: "VP Engineering rejects your 24% comp gap data because it's 'uncomfortable'.", nodes: { start: { scene: "Marcus: 'I don't think we're 24% off. Methodology concerns.'", choices: [{ text: "Walk through methodology as transparency, not defense.", next: "final", xp: 28, tag: "INFLUENCE" }] }, final: { scene: "Marcus aligned on the gap.", isEnd: true } } },
-            { id: "s13", title: "STAKEHOLDER FLIP", subtitle: "Hiring Manager Lens", difficulty: "LEVEL 1 · ANALYST", accent: "#4ade80", brief: "Switch perspective. You are the Hiring Manager. TI says your budget is 18% low.", nodes: { start: { scene: "You've had recent success on current budget. TI says market has shifted.", choices: [{ text: "Engage TI with curiosity to understand the gap.", next: "final", xp: 30, tag: "PARTNERSHIP" }] }, final: { scene: "Budget and strategy updated.", isEnd: true } } }
+            { id: "s13", title: "STAKEHOLDER FLIP", subtitle: "Hiring Manager Lens", difficulty: "LEVEL 1 · ANALYST", accent: "#4ade80", brief: "Switch perspective. You are the Hiring Manager. TI says your budget is 18% low.", nodes: { start: { scene: "You've had recent success on current budget. TI says market has shifted.", choices: [{ text: "Engage TI with curiosity to understand the gap.", next: "final", xp: 30, tag: "PARTNERSHIP" }] }, final: { scene: "Budget and strategy updated.", isEnd: true } } },
+            {
+                id: "vt1",
+                title: "VIRTUAL WAR ROOM",
+                subtitle: "Running a TI Squad",
+                difficulty: "LEVEL 4 · SQUAD LEAD",
+                accent: "#ec4899",
+                xpReward: 260,
+                mode: "team",
+                requiresModuleId: "team_mode",
+                brief: "You lead a small virtual TI squad (mentor, peer, boss) through a messy, multi-step market intelligence response where alignment, disagreement, and escalation all matter. Every decision advances the simulation timeline and shifts organisational risk and trust that will carry into future missions.",
+                nodes: {
+                    start: {
+                        scene: "Your TI squad assembles on a late Friday call. A business unit wants to open a new hub in Berlin with 120 specialised data roles. They expect a go/no-go answer by Monday.",
+                        choices: [
+                            {
+                                text: "Align the squad: clarify roles and time-box the work before touching data.",
+                                next: "align_squad",
+                                xp: 40,
+                                tag: "TEAM_LEADERSHIP",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -3,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 4 },
+                                        { personaId: "mentor", delta: 3 },
+                                        { personaId: "peer", delta: 3 }
+                                    ]
+                                }
+                            },
+                            {
+                                text: "Dive into data yourself; the squad can follow later.",
+                                next: "solo_start",
+                                xp: 15,
+                                tag: "OVERFUNCTIONING",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: 5,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: -5 },
+                                        { personaId: "peer", delta: -2 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    align_squad: {
+                        scene: "You frame the outcome, assign streams (market scan, internal mobility, risk), and secure a short Sunday check-in. The boss sounds cautiously optimistic.",
+                        choices: [
+                            {
+                                text: "Invite the peer to challenge your initial framing before committing.",
+                                next: "peer_challenge",
+                                xp: 35,
+                                tag: "PSYCHOLOGICAL_SAFETY",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -1,
+                                    personaTrustDeltas: [
+                                        { personaId: "peer", delta: 4 },
+                                        { personaId: "mentor", delta: 2 }
+                                    ]
+                                }
+                            },
+                            {
+                                text: "Lock the framing and move straight to external market data.",
+                                next: "market_scan",
+                                xp: 25,
+                                tag: "DECISIVE",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -1,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 2 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    solo_start: {
+                        scene: "You pull Lightcast and LinkedIn data alone. The squad channel is quiet; the boss pings: 'Loop us in before you crystallise a view.'",
+                        choices: [
+                            {
+                                text: "Pause and reset with the squad to avoid surprises later.",
+                                next: "align_squad",
+                                xp: 20,
+                                tag: "COURSE_CORRECTION",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -2,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 3 },
+                                        { personaId: "peer", delta: 3 },
+                                        { personaId: "mentor", delta: 2 }
+                                    ]
+                                }
+                            },
+                            {
+                                text: "Keep going solo to save time and present a finished answer.",
+                                next: "boss_pushback",
+                                xp: 5,
+                                tag: "RISK",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: 5,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: -3 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    peer_challenge: {
+                        scene: "Your peer points out a blind spot: you assumed Berlin, but internal attrition data suggests Amsterdam as a quieter talent market for the same roles.",
+                        choices: [
+                            {
+                                text: "Re-open scope: compare Berlin and Amsterdam as options for the squad.",
+                                next: "option_space",
+                                xp: 35,
+                                tag: "OPTIONALITY",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -1,
+                                    personaTrustDeltas: [
+                                        { personaId: "peer", delta: 2 },
+                                        { personaId: "boss", delta: 1 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    market_scan: {
+                        scene: "The squad pulls salary, time-to-fill, and competitor footprint data. Signals are mixed: Berlin is deep but overheated; Amsterdam is shallower but less contested.",
+                        externalData: {
+                            requests: [
+                                {
+                                    id: "vt1_berlin_amsterdam",
+                                    service: "marketData",
+                                    operation: "getLocationComparison",
+                                    key: "vt1_berlin_amsterdam",
+                                    params: {
+                                        locations: ["Berlin", "Amsterdam"],
+                                        roleFamily: "Data",
+                                        requestedHeadcount: 120
+                                    }
+                                }
+                            ]
+                        },
+                        choices: [
+                            {
+                                text: "Summarise pros/cons and bring your boss into a trade-off conversation.",
+                                next: "boss_alignment",
+                                xp: 30,
+                                tag: "STAKEHOLDER_MANAGEMENT",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -1,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 3 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    boss_pushback: {
+                        scene: "Your boss joins late and feels sidelined. 'This looks like your view, not the squad’s. How confident are you if the numbers are challenged?'",
+                        choices: [
+                            {
+                                text: "Acknowledge the gap and pull the squad in to stress-test before Monday.",
+                                next: "option_space",
+                                xp: 25,
+                                tag: "RECOVERY",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -2,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 2 },
+                                        { personaId: "peer", delta: 2 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    option_space: {
+                        scene: "Together, the squad maps three options: (1) Berlin full build, (2) Amsterdam hub, (3) hybrid model with remote first senior roles.",
+                        choices: [
+                            {
+                                text: "Ask the mentor persona to help sharpen the decision criteria before presenting options.",
+                                next: "mentor_criteria",
+                                xp: 35,
+                                tag: "SEEKING_WISDOM",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: 0,
+                                    personaTrustDeltas: [
+                                        { personaId: "mentor", delta: 3 },
+                                        { personaId: "peer", delta: 1 },
+                                        { personaId: "boss", delta: 1 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    mentor_criteria: {
+                        scene: "You define clear criteria with the squad: time-to-build, risk to current teams, employer brand impact, and leadership appetite for remote.",
+                        choices: [
+                            {
+                                text: "Co-create a short narrative deck that tells the story through those criteria.",
+                                next: "final",
+                                xp: 40,
+                                tag: "NARRATIVE",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -4,
+                                    personaTrustDeltas: [
+                                        { personaId: "mentor", delta: 2 },
+                                        { personaId: "boss", delta: 2 },
+                                        { personaId: "peer", delta: 2 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    boss_alignment: {
+                        scene: "Your boss leans into the trade-offs and suggests you leave a clear recommendation but also surface the risk profile for each path.",
+                        choices: [
+                            {
+                                text: "Frame the recommendation as a squad view, with explicit assumptions and residual risks.",
+                                next: "final",
+                                xp: 35,
+                                tag: "EXECUTIVE_READY",
+                                effects: {
+                                    advanceWeeks: 1,
+                                    orgRiskDelta: -3,
+                                    personaTrustDeltas: [
+                                        { personaId: "boss", delta: 3 },
+                                        { personaId: "mentor", delta: 1 }
+                                    ]
+                                }
+                            }
+                        ]
+                    },
+                    final: {
+                        scene: "On Monday, the business leaves with a realistic, squad-owned recommendation and clear constraints. Your TI squad is now the default war room for location strategy.",
+                        isEnd: true
+                    }
+                }
+            }
         ];
 
         // API UTILS
@@ -172,12 +1466,145 @@
         const App = () => {
             const [view, setView] = useState('welcome');
             const [user, setUser] = useState(null);
-            const [gameState, setGameState] = useState({ xp: 0, completed: {} });
+            const [gameState, setGameState] = useState(() => mergeProfileData(null));
             const [currentSim, setCurrentSim] = useState(null);
             const [currentNode, setCurrentNode] = useState('start');
             const [history, setHistory] = useState([]);
-            const [aiFeedback, setAiFeedback] = useState("");
+            const [aiFeedback, setAiFeedback] = useState([]);
             const [isGenerating, setIsGenerating] = useState(false);
+            const [integrationState, setIntegrationState] = useState({
+                status: "idle",
+                lastRequest: null,
+                payload: null,
+                error: null
+            });
+            const [adminConfig, setAdminConfig] = useState(loadAdminConfig());
+            const [labels, setLabels] = useState([]);
+            const [newTenantName, setNewTenantName] = useState("");
+            const [analyticsState, setAnalyticsState] = useState({
+                loading: false,
+                error: null,
+                scenarioStats: [],
+                totalStarted: 0,
+                totalCompleted: 0,
+                variantStats: []
+            });
+            const [customScenarios, setCustomScenarios] = useState(() => loadCustomScenarios());
+
+            const tenantConfig = getTenantConfig(adminConfig);
+            const allScenariosById = {};
+            [...SCENARIOS, ...customScenarios].forEach((scenario) => {
+                if (scenario && typeof scenario.id === "string") {
+                    allScenariosById[scenario.id] = scenario;
+                }
+            });
+            const allScenarios = Object.values(allScenariosById);
+            const visibleScenarios = getVisibleScenarios(adminConfig, allScenarios);
+            const competencyEvidence = gameState.competencyEvidence || {};
+            const competencySummaries = getCompetencySummaries(competencyEvidence)
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 3)
+                .map((entry) => {
+                    const competency = COMPETENCIES.find((c) => c.id === entry.id);
+                    return {
+                        id: entry.id,
+                        count: entry.count,
+                        label: competency ? competency.label : entry.id
+                    };
+                });
+
+            const runExternalDataHooksForNode = async (scenario, nodeId) => {
+                if (!scenario || !scenario.nodes || !nodeId) {
+                    setIntegrationState({
+                        status: "idle",
+                        lastRequest: null,
+                        payload: null,
+                        error: null
+                    });
+                    return;
+                }
+
+                const node = scenario.nodes[nodeId];
+                if (!node || !node.externalData || !Array.isArray(node.externalData.requests) || node.externalData.requests.length === 0) {
+                    setIntegrationState({
+                        status: "idle",
+                        lastRequest: null,
+                        payload: null,
+                        error: null
+                    });
+                    return;
+                }
+
+                const requests = node.externalData.requests;
+                const context = {
+                    userId: user ? user.uid : null,
+                    scenarioId: scenario.id,
+                    nodeId
+                };
+
+                setIntegrationState({
+                    status: "loading",
+                    lastRequest: {
+                        scenarioId: scenario.id,
+                        nodeId,
+                        requests
+                    },
+                    payload: null,
+                    error: null
+                });
+
+                try {
+                    const results = {};
+
+                    for (const request of requests) {
+                        if (!request || typeof request.service !== "string") {
+                            continue;
+                        }
+
+                        if (request.service === "marketData") {
+                            const result = await marketDataService.getLocationComparison(request, context);
+                            results[request.id || "marketData"] = result;
+                        } else if (request.service === "compBench") {
+                            const result = await compBenchService.getRoleCompSnapshot(request, context);
+                            results[request.id || "compBench"] = result;
+                        } else if (request.service === "hris") {
+                            const result = await hrisService.getSnapshot(request, context);
+                            results[request.id || "hris"] = result;
+                        }
+                    }
+
+                    setIntegrationState({
+                        status: "ready",
+                        lastRequest: {
+                            scenarioId: scenario.id,
+                            nodeId,
+                            requests
+                        },
+                        payload: results,
+                        error: null
+                    });
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : "Unable to load external data.";
+                    setIntegrationState({
+                        status: "error",
+                        lastRequest: {
+                            scenarioId: scenario.id,
+                            nodeId,
+                            requests
+                        },
+                        payload: null,
+                        error: message
+                    });
+
+                    if (user) {
+                        logEvent(user.uid, "integration_error", {
+                            scenarioId: scenario.id,
+                            nodeId,
+                            message
+                        });
+                    }
+                }
+            };
 
             useEffect(() => {
                 const { auth, onAuthStateChanged, signInAnonymously } = window.fb;
@@ -189,36 +1616,267 @@
 
             const loadProfile = async (uid) => {
                 const snap = await window.fb.getDoc(window.fb.doc(window.fb.db, 'artifacts', window.__app_id, 'users', uid, 'profile'));
-                if (snap.exists()) setGameState(snap.data());
+                if (snap.exists()) {
+                    const data = mergeProfileData(snap.data());
+                    setGameState(data);
+                    const completedCount = Object.keys(data.completed || {}).length;
+                    const evidence = data.competencyEvidence || {};
+                    setLabels(computeLabels(data.xp, completedCount, evidence));
+                } else {
+                    setGameState(mergeProfileData(null));
+                    setLabels([]);
+                }
             };
 
             const startSim = (sim) => {
-                setCurrentSim(sim); setCurrentNode('start'); setHistory([]); setAiFeedback(""); setView('playing');
-                playTTS(sim.nodes.start.scene);
+                setCurrentSim(sim);
+                setCurrentNode('start');
+                setHistory([]);
+                setAiFeedback([]);
+                setView('playing');
+                setIntegrationState({
+                    status: "idle",
+                    lastRequest: null,
+                    payload: null,
+                    error: null
+                });
+
+                if (tenantConfig.modules.voice_overlay && sim && sim.nodes && sim.nodes.start && sim.nodes.start.scene) {
+                    playTTS(sim.nodes.start.scene);
+                }
+                if (user) {
+                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                    const experimentsForMission = getActiveExperimentsForContext({
+                        userId: user.uid,
+                        tenantId,
+                        scenarioId: sim.id,
+                        tenantConfig
+                    });
+
+                    const existingLabels = Array.isArray(labels) ? labels : [];
+                    const labelIds = existingLabels.map((entry) => entry && entry.id).filter(Boolean);
+                    const scenarioTags = Object.values(sim.nodes || {}).reduce((acc, node) => {
+                        if (!node || !Array.isArray(node.choices)) {
+                            return acc;
+                        }
+                        node.choices.forEach((choiceEntry) => {
+                            if (choiceEntry && typeof choiceEntry.tag === "string" && !acc.includes(choiceEntry.tag)) {
+                                acc.push(choiceEntry.tag);
+                            }
+                        });
+                        return acc;
+                    }, []);
+
+                    if (Object.keys(experimentsForMission).length > 0) {
+                        logEvent(
+                            user.uid,
+                            "experiment_assignment",
+                            {
+                                scenarioId: sim.id
+                            },
+                            {
+                                tenantId,
+                                experiments: experimentsForMission
+                            }
+                        );
+                    }
+
+                    logEvent(
+                        user.uid,
+                        "mission_start",
+                        {
+                            scenarioId: sim.id,
+                            title: sim.title,
+                            xpBefore: gameState.xp,
+                            xpAfter: gameState.xp,
+                            labelsBefore: labelIds,
+                            labelsAfter: labelIds,
+                            scenarioTags
+                        },
+                        {
+                            tenantId,
+                            experiments: experimentsForMission
+                        }
+                    );
+                }
+
+                runExternalDataHooksForNode(sim, 'start');
             };
 
             const handleDecision = async (choice) => {
-                setIsGenerating(true);
-                const feedback = await callGemini(`Scenario: ${currentSim.title}. Context: ${currentSim.nodes[currentNode].scene}. Choice: ${choice.text}.`);
-                setAiFeedback(feedback); setIsGenerating(false);
-                setHistory([...history, { choice: choice.text, tag: choice.tag }]);
+                const nextHistory = [...history, { choice: choice.text, tag: choice.tag }];
+                setHistory(nextHistory);
+
+                if (tenantConfig.modules.mentor_persona) {
+                    setIsGenerating(true);
+
+                    const isTeamMode = currentSim && currentSim.mode === "team";
+                    const personaList = isTeamMode
+                        ? PERSONAS.filter((persona) => persona.id === "mentor" || persona.id === "boss" || persona.id === "peer")
+                        : [getActivePersona(adminConfig)];
+
+                    const meta = gameState.meta || createMeta();
+                    const profileSummary = formatProfileSummaryForPrompt(gameState, allScenarios);
+                    const historySummary = formatDecisionHistoryForPrompt(nextHistory);
+
+                    const feedbackEntries = [];
+
+                    for (const persona of personaList) {
+                        const trustScoreRaw = meta.personaTrust && typeof meta.personaTrust[persona.id] === "number"
+                            ? meta.personaTrust[persona.id]
+                            : 0;
+
+                        const prompt = `
+Persona: ${persona.label} (${persona.role}).
+Tone: ${persona.tone}.
+Perspective: ${persona.perspective}.
+
+Scenario: ${currentSim.title}.
+Current scene: ${currentSim.nodes[currentNode].scene}
+Chosen option: ${choice.text}
+
+Profile summary:
+${profileSummary}
+
+Mission decision history (including this step):
+${historySummary}
+
+Timeline week: ${meta.timelineWeek}.
+Organisational risk index: ${meta.orgRisk}.
+Current trust score with you (range -100 to 100): ${trustScoreRaw}.
+
+Provide feedback in a maximum of 2 sentences from this persona's point of view.
+Focus on decision quality, trade-offs, and how this choice affects long-term trust and team dynamics.`;
+
+                        const text = await callGemini(prompt);
+                        if (text) {
+                            feedbackEntries.push({
+                                personaId: persona.id,
+                                heading: getPersonaFeedbackHeading(persona.id),
+                                text
+                            });
+                        }
+                    }
+
+                    setAiFeedback(feedbackEntries);
+                    setIsGenerating(false);
+                }
+                if (user) {
+                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                    const experimentsForMission = getActiveExperimentsForContext({
+                        userId: user.uid,
+                        tenantId,
+                        scenarioId: currentSim.id,
+                        tenantConfig
+                    });
+
+                    logEvent(
+                        user.uid,
+                        "decision_made",
+                        {
+                            scenarioId: currentSim.id,
+                            nodeId: currentNode,
+                            choiceText: choice.text,
+                            tag: choice.tag || null,
+                            competencyIds: getCompetencyIdsForTag(choice.tag)
+                        },
+                        {
+                            tenantId,
+                            experiments: experimentsForMission
+                        }
+                    );
+                }
                 
                 if (currentSim.nodes[choice.next]?.isEnd) {
-                    const newXp = gameState.xp + (choice.xp || 30);
+                    const previousXp = gameState.xp;
+                    const xpAwarded = typeof choice.xp === "number" ? choice.xp : 30;
+                    const newXp = previousXp + xpAwarded;
                     const newComp = { ...gameState.completed, [currentSim.id]: true };
-                    setGameState({ xp: newXp, completed: newComp });
-                    window.fb.setDoc(window.fb.doc(window.fb.db, 'artifacts', window.__app_id, 'users', user.uid, 'profile'), { xp: newXp, completed: newComp });
+                    const nextMeta = applyEffectsToMeta(gameState.meta, choice.effects);
+                    const nextCompetencyEvidence = updateCompetencyEvidence(competencyEvidence, currentSim.id, nextHistory);
+                    const updated = { xp: newXp, completed: newComp, meta: nextMeta, competencyEvidence: nextCompetencyEvidence };
+                    setGameState(updated);
+                    const completedCount = Object.keys(newComp).length;
+                    const nextLabels = computeLabels(newXp, completedCount, nextCompetencyEvidence);
+                    const previousLabels = Array.isArray(labels) ? labels : [];
+                    setLabels(nextLabels);
+                    if (user) {
+                        window.fb.setDoc(
+                            window.fb.doc(window.fb.db, 'artifacts', window.__app_id, 'users', user.uid, 'profile'),
+                            { xp: newXp, completed: newComp, labels: nextLabels, meta: nextMeta, competencyEvidence: nextCompetencyEvidence },
+                            { merge: true }
+                        );
+                    }
+                    if (user) {
+                        const evidenceForEvent = getCompetencySummaries(nextCompetencyEvidence);
+                        const evidenceCoverage = evidenceForEvent.length;
+                        const evidenceDecisionCount = evidenceForEvent.reduce((total, entry) => total + entry.count, 0);
+                        const labelIdsBefore = previousLabels.map((label) => label && label.id).filter(Boolean);
+                        const labelIdsAfter = nextLabels.map((label) => label && label.id).filter(Boolean);
+                        const scenarioTags = Object.values(currentSim.nodes || {}).reduce((acc, node) => {
+                            if (!node || !Array.isArray(node.choices)) {
+                                return acc;
+                            }
+                            node.choices.forEach((choiceEntry) => {
+                                if (choiceEntry && typeof choiceEntry.tag === "string" && !acc.includes(choiceEntry.tag)) {
+                                    acc.push(choiceEntry.tag);
+                                }
+                            });
+                            return acc;
+                        }, []);
+                        const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                        const experimentsForMission = getActiveExperimentsForContext({
+                            userId: user.uid,
+                            tenantId,
+                            scenarioId: currentSim.id,
+                            tenantConfig
+                        });
+
+                        logEvent(
+                            user.uid,
+                            "mission_complete",
+                            {
+                                scenarioId: currentSim.id,
+                                title: currentSim.title,
+                                xpAwarded,
+                                totalXp: newXp,
+                                xpBefore: previousXp,
+                                xpAfter: newXp,
+                                labelsBefore: labelIdsBefore,
+                                labelsAfter: labelIdsAfter,
+                                scenarioTags,
+                                labels: labelIdsAfter,
+                                competencyEvidenceCoverage: evidenceCoverage,
+                                competencyEvidenceDecisions: evidenceDecisionCount
+                            },
+                            {
+                                tenantId,
+                                experiments: experimentsForMission
+                            }
+                        );
+                    }
                     setView('summary');
                 } else {
-                    setCurrentNode(choice.next);
-                    playTTS(currentSim.nodes[choice.next].scene);
+                    const nextMeta = applyEffectsToMeta(gameState.meta, choice.effects);
+                    setGameState(prev => ({ ...prev, meta: nextMeta }));
+
+                    const nextNodeId = choice.next;
+                    setCurrentNode(nextNodeId);
+
+                    const nextNode = currentSim && currentSim.nodes ? currentSim.nodes[nextNodeId] : null;
+                    if (tenantConfig.modules.voice_overlay && nextNode && nextNode.scene) {
+                        playTTS(nextNode.scene);
+                    }
+
+                    runExternalDataHooksForNode(currentSim, nextNodeId);
                 }
             };
 
             const getRank = (xp) => {
                 if (xp < 500) return "LEVEL_0 · APPRENTICE";
                 if (xp < 1500) return "LEVEL_1 · ANALYST";
-                return "LEVEL_2 · ADVISOR";
+                if (xp < 3000) return "LEVEL_2 · ADVISOR";
+                return "LEVEL_3 · ARCHITECT";
             };
 
             useEffect(() => { lucide.createIcons(); }, [view, currentNode, isGenerating]);
@@ -233,8 +1891,462 @@
                 </button>
             );
 
+            const AnalyticsView = ({ state, onReload }) => {
+                const hasData = Array.isArray(state.scenarioStats) && state.scenarioStats.length > 0;
+                const hasVariantData = Array.isArray(state.variantStats) && state.variantStats.length > 0;
+
+                return (
+                    <div className="max-w-5xl mx-auto space-y-6 pt-4">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-lg font-bold mono border-b border-white/10 pb-4 flex-1">ANALYTICS_OVERVIEW</h2>
+                            <button
+                                onClick={onReload}
+                                className="ml-4 px-3 py-2 text-[10px] mono rounded border border-sky-500/60 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 transition-colors"
+                            >
+                                REFRESH_DATA
+                            </button>
+                        </div>
+
+                        {state.loading && (
+                            <p className="text-[11px] text-white/40 mono">Loading analytics from Firestore…</p>
+                        )}
+                        {state.error && (
+                            <p className="text-[11px] text-amber-300 mono">Analytics not available: {state.error}</p>
+                        )}
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="glass p-4 rounded border border-white/10">
+                                <p className="text-[9px] mono text-white/30 mb-1">MISSIONS_STARTED</p>
+                                <p className="text-2xl font-bold">{state.totalStarted}</p>
+                            </div>
+                            <div className="glass p-4 rounded border border-white/10">
+                                <p className="text-[9px] mono text-white/30 mb-1">MISSIONS_COMPLETED</p>
+                                <p className="text-2xl font-bold">{state.totalCompleted}</p>
+                            </div>
+                            <div className="glass p-4 rounded border border-white/10">
+                                <p className="text-[9px] mono text-white/30 mb-1">COMPLETION_RATE</p>
+                                <p className="text-2xl font-bold">
+                                    {state.totalStarted === 0
+                                        ? "—"
+                                        : `${Math.round((state.totalCompleted / state.totalStarted) * 100)}%`}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="glass p-5 rounded border border-white/10 space-y-3">
+                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">SCENARIO_PERFORMANCE · CURRENT_USER</h3>
+                            {!hasData && !state.loading && !state.error && (
+                                <p className="text-[11px] text-white/30">
+                                    No events recorded yet for this user. Once you play missions, per-scenario stats will appear here.
+                                </p>
+                            )}
+                            {hasData && (
+                                <div className="space-y-2">
+                                    {state.scenarioStats.map((entry) => (
+                                        <div
+                                            key={entry.scenarioId}
+                                            className="flex items-center justify-between text-[11px] bg-white/5 rounded px-3 py-2"
+                                        >
+                                            <div>
+                                                <p className="font-semibold">{entry.title}</p>
+                                                <p className="text-white/40 mono">
+                                                    {entry.started} started · {entry.completed} completed
+                                                </p>
+                                            </div>
+                                            <div className="text-right mono">
+                                                <p className="text-[10px] text-white/40">COMPLETION</p>
+                                                <p className="font-bold">
+                                                    {entry.started === 0
+                                                        ? "—"
+                                                        : `${Math.round((entry.completed / entry.started) * 100)}%`}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {hasVariantData && (
+                            <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">EXPERIMENT_VARIANTS · COMPLETION &amp; XP</h3>
+                                <p className="text-[11px] text-white/40">
+                                    Breakdown of missions by experiment variant (where experiments were active). Use this to compare completion and XP deltas across variants.
+                                </p>
+                                <div className="space-y-2 max-h-72 overflow-y-auto pr-2">
+                                    {state.variantStats.map((entry) => (
+                                        <div
+                                            key={`${entry.experimentId}::${entry.scenarioId}::${entry.variantId}`}
+                                            className="flex items-center justify-between text-[11px] bg-white/5 rounded px-3 py-2"
+                                        >
+                                            <div className="flex-1 pr-4">
+                                                <p className="font-semibold">
+                                                    {entry.title} <span className="text-white/40 mono text-[9px]">({entry.scenarioId})</span>
+                                                </p>
+                                                <p className="text-white/40 mono text-[10px]">
+                                                    EXP: {entry.experimentId} · VARIANT: {entry.variantId}
+                                                </p>
+                                                <p className="text-white/40 mono text-[10px]">
+                                                    {entry.started} started · {entry.completed} completed
+                                                </p>
+                                            </div>
+                                            <div className="text-right mono">
+                                                <p className="text-[10px] text-white/40">COMPLETION</p>
+                                                <p className="font-bold">
+                                                    {entry.started === 0
+                                                        ? "—"
+                                                        : `${Math.round((entry.completed / entry.started) * 100)}%`}
+                                                </p>
+                                                <p className="text-[10px] text-white/40 mt-1">AVG_XP_DELTA</p>
+                                                <p className="font-bold">
+                                                    {typeof entry.avgXpDelta === "number"
+                                                        ? `${Math.round(entry.avgXpDelta)}`
+                                                        : "—"}
+                                                </p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="glass p-5 rounded border border-dashed border-white/20 space-y-2">
+                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">FUTURE_VIEWS · TEAM_ANALYTICS</h3>
+                            <p className="text-[11px] text-white/40">
+                                This prototype focuses on per-user stats. Multi-user cohort analytics, drop-off heatmaps,
+                                and label distribution over time can be layered on top of the same event schema in a
+                                future multi-tenant backend.
+                            </p>
+                        </div>
+                    </div>
+                );
+            };
+
+            const ToolsPanel = ({ meta, onApplyScenario }) => {
+                const [location, setLocation] = useState("Berlin");
+                const [roles, setRoles] = useState(60);
+                const [months, setMonths] = useState(6);
+
+                const safeRoles = Number.isFinite(roles) ? roles : 0;
+                const safeMonths = Number.isFinite(months) && months > 0 ? months : 1;
+
+                const monthlyHiringCapacity = 15;
+                const projectedTimeToFill = Math.ceil(safeRoles / monthlyHiringCapacity);
+                const capacityGap = projectedTimeToFill - safeMonths;
+
+                const applyScenario = () => {
+                    const riskDelta = capacityGap > 0 ? Math.min(20, capacityGap * 3) : -5;
+                    const advanceWeeks = safeMonths * 4;
+
+                    onApplyScenario({
+                        orgRiskDelta: riskDelta,
+                        advanceWeeks
+                    });
+                };
+
+                return (
+                    <div className="glass p-5 rounded-lg border border-white/10 space-y-4">
+                        <h4 className="text-[9px] mono text-white/30 uppercase tracking-[0.2em]">TI_TOOLS · MARKET_SIM</h4>
+                        <div className="space-y-3 text-[11px]">
+                            <div className="flex flex-col gap-1">
+                                <label className="text-white/40 mono">Target Location</label>
+                                <select
+                                    value={location}
+                                    onChange={(e) => setLocation(e.target.value)}
+                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                                >
+                                    <option value="Berlin">Berlin</option>
+                                    <option value="Amsterdam">Amsterdam</option>
+                                    <option value="Remote-first EU">Remote-first EU</option>
+                                </select>
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-white/40 mono">Roles to Fill</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="500"
+                                    value={roles}
+                                    onChange={(e) => setRoles(parseInt(e.target.value, 10) || 0)}
+                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                                />
+                            </div>
+                            <div className="flex flex-col gap-1">
+                                <label className="text-white/40 mono">Months Available</label>
+                                <input
+                                    type="number"
+                                    min="1"
+                                    max="36"
+                                    value={months}
+                                    onChange={(e) => setMonths(parseInt(e.target.value, 10) || 1)}
+                                    className="bg-black/40 border border-white/10 rounded px-2 py-1 text-xs"
+                                />
+                            </div>
+                        </div>
+
+                        <div className="bg-white/5 rounded p-3 space-y-1 text-[10px] mono">
+                            <p className="text-white/40">Simulated Capacity · {location}</p>
+                            <p className="text-white">
+                                {safeRoles} roles in {safeMonths} months →
+                                <span className="text-sky-400"> {projectedTimeToFill} months</span> at current capacity
+                            </p>
+                            <p className={capacityGap > 0 ? "text-amber-300" : "text-emerald-300"}>
+                                {capacityGap > 0
+                                    ? `Capacity shortfall of ~${capacityGap} months. Organisational risk will increase.`
+                                    : "Within capacity envelope. Organisational risk will ease slightly."}
+                            </p>
+                        </div>
+
+                        <button
+                            onClick={applyScenario}
+                            className="w-full mt-1 px-3 py-2 text-[10px] mono rounded border border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 transition-all"
+                        >
+                            APPLY_SCENARIO_TO_TIMELINE
+                        </button>
+
+                        <div className="border-t border-white/10 pt-3 mt-2 text-[10px] text-white/40 mono">
+                            <p>SIM_WEEK: <span className="text-white">{meta.timelineWeek}</span></p>
+                            <p>ORG_RISK: <span className="text-white">{meta.orgRisk}</span>/100</p>
+                        </div>
+                    </div>
+                );
+            };
+
+            const ScenarioEditorPanel = ({ allScenarios, onImportScenario }) => {
+                const [sdlText, setSdlText] = useState(() => {
+                    const example = {
+                        schemaVersion: SDL_SCHEMA_VERSION,
+                        id: "example_scenario",
+                        title: "EXAMPLE MISSION",
+                        subtitle: "Replace with your own title",
+                        difficulty: "LEVEL 1 · ANALYST",
+                        accent: "#38bdf8",
+                        xpReward: 100,
+                        brief: "Short one-line description of the mission.",
+                        nodes: {
+                            start: {
+                                scene: "Describe the opening situation for the player.",
+                                choices: [
+                                    {
+                                        text: "Example decision that should feel clearly 'good'.",
+                                        next: "final",
+                                        xp: 30,
+                                        tag: "BEST PRACTICE"
+                                    }
+                                ]
+                            },
+                            final: {
+                                scene: "Describe the outcome once the player reaches the end.",
+                                isEnd: true
+                            }
+                        }
+                    };
+
+                    try {
+                        return JSON.stringify(example, null, 2);
+                    } catch (error) {
+                        return "";
+                    }
+                });
+
+                const [validationResult, setValidationResult] = useState({
+                    status: "idle",
+                    errors: [],
+                    warnings: []
+                });
+
+                const [selectedScenarioId, setSelectedScenarioId] = useState("");
+
+                const handleValidate = () => {
+                    let parsed;
+                    try {
+                        parsed = JSON.parse(sdlText);
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : "Unknown JSON parse error.";
+                        setValidationResult({
+                            status: "error",
+                            errors: [`SDL is not valid JSON: ${message}`],
+                            warnings: []
+                        });
+                        return;
+                    }
+
+                    const result = validateScenarioSDL(parsed);
+                    setValidationResult({
+                        status: result.isValid ? "ok" : "error",
+                        errors: result.errors || [],
+                        warnings: result.warnings || []
+                    });
+                };
+
+                const handleImport = () => {
+                    let parsed;
+                    try {
+                        parsed = JSON.parse(sdlText);
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : "Unknown JSON parse error.";
+                        setValidationResult({
+                            status: "error",
+                            errors: [`SDL is not valid JSON: ${message}`],
+                            warnings: []
+                        });
+                        return;
+                    }
+
+                    const result = validateScenarioSDL(parsed);
+                    setValidationResult({
+                        status: result.isValid ? "ok" : "error",
+                        errors: result.errors || [],
+                        warnings: result.warnings || []
+                    });
+
+                    if (!result.isValid || !result.scenario) {
+                        return;
+                    }
+
+                    if (onImportScenario) {
+                        onImportScenario(result.scenario);
+                    }
+                };
+
+                const handleExportExisting = () => {
+                    if (!selectedScenarioId) {
+                        return;
+                    }
+                    const scenario = (allScenarios || []).find((s) => s.id === selectedScenarioId);
+                    if (!scenario) {
+                        setValidationResult({
+                            status: "error",
+                            errors: [`No scenario found with id '${selectedScenarioId}'.`],
+                            warnings: []
+                        });
+                        return;
+                    }
+                    const sdl = scenarioToSDL(scenario);
+                    if (!sdl) {
+                        setValidationResult({
+                            status: "error",
+                            errors: ["Unable to convert scenario to SDL."],
+                            warnings: []
+                        });
+                        return;
+                    }
+                    try {
+                        setSdlText(JSON.stringify(sdl, null, 2));
+                        setValidationResult({
+                            status: "idle",
+                            errors: [],
+                            warnings: []
+                        });
+                    } catch (error) {
+                        const message = error instanceof Error ? error.message : "Unable to serialise scenario to SDL.";
+                        setValidationResult({
+                            status: "error",
+                            errors: [message],
+                            warnings: []
+                        });
+                    }
+                };
+
+                const knownTags = KNOWN_COMPETENCY_TAGS;
+
+                return (
+                    <div className="glass p-5 rounded border border-white/10 space-y-3">
+                        <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">SCENARIO_AUTHORING_SDL</h3>
+                        <p className="text-[11px] text-white/40">
+                            Author or edit scenarios in a JSON-based Scenario Definition Language (SDL). Validation ensures compatibility with the existing simulation engine and competency model.
+                        </p>
+
+                        <div className="space-y-2">
+                            <label className="text-[10px] mono text-white/40 uppercase tracking-[0.2em]">EXPORT_EXISTING_SCENARIO</label>
+                            <div className="flex flex-col sm:flex-row gap-2">
+                                <select
+                                    value={selectedScenarioId}
+                                    onChange={(event) => setSelectedScenarioId(event.target.value)}
+                                    className="flex-1 bg-black/40 border border-white/10 rounded px-3 py-2 text-[11px] text-white/80 outline-none focus:border-sky-500/60"
+                                >
+                                    <option value="">Select a scenario to export…</option>
+                                    {(allScenarios || []).map((scenario) => (
+                                        <option key={scenario.id} value={scenario.id}>
+                                            {scenario.id} · {scenario.title}
+                                        </option>
+                                    ))}
+                                </select>
+                                <button
+                                    type="button"
+                                    onClick={handleExportExisting}
+                                    className="px-4 py-2 text-[11px] mono rounded border border-sky-500/60 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 transition-colors"
+                                >
+                                    LOAD_AS_SDL
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="space-y-2">
+                            <label className="text-[10px] mono text-white/40 uppercase tracking-[0.2em]">SDL_JSON</label>
+                            <textarea
+                                value={sdlText}
+                                onChange={(event) => setSdlText(event.target.value)}
+                                rows={12}
+                                className="w-full bg-black/40 border border-white/10 rounded px-3 py-2 text-[11px] text-white/80 font-mono resize-y outline-none focus:border-sky-500/60"
+                            />
+                        </div>
+
+                        <div className="flex flex-wrap gap-2">
+                            <button
+                                type="button"
+                                onClick={handleValidate}
+                                className="px-4 py-2 text-[11px] mono rounded border border-white/40 bg-white/5 text-white hover:border-sky-500/60 hover:bg-sky-500/10 transition-colors"
+                            >
+                                VALIDATE_SDL
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleImport}
+                                className="px-4 py-2 text-[11px] mono rounded border border-emerald-500/60 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20 transition-colors"
+                            >
+                                IMPORT_INTO_CONSOLE
+                            </button>
+                        </div>
+
+                        {validationResult.status !== "idle" && (
+                            <div className="space-y-2 text-[10px] mono">
+                                {validationResult.status === "ok" && (
+                                    <p className="text-emerald-300">SDL is valid and ready to use.</p>
+                                )}
+                                {validationResult.errors.length > 0 && (
+                                    <div className="space-y-1">
+                                        {validationResult.errors.map((message, index) => (
+                                            <p key={index} className="text-amber-300">
+                                                • {message}
+                                            </p>
+                                        ))}
+                                    </div>
+                                )}
+                                {validationResult.warnings.length > 0 && (
+                                    <div className="space-y-1">
+                                        {validationResult.warnings.map((message, index) => (
+                                            <p key={index} className="text-white/50">
+                                                • {message}
+                                            </p>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+
+                        <div className="border-t border-white/10 pt-3 mt-2">
+                            <p className="text-[9px] mono text-white/30 mb-1">KNOWN_COMPETENCY_TAGS</p>
+                            <p className="text-[10px] text-white/50 leading-relaxed">
+                                {knownTags.join(" · ")}
+                            </p>
+                        </div>
+                    </div>
+                );
+            };
+
             return (
-                <div className="flex flex-col min-h-screen bg-grid">
+                                <div className="flex flex-col min-h-screen bg-grid">
                     <div className="scanline"></div>
                     
                     {/* Header: Responsive Scaling */}
@@ -259,6 +2371,8 @@
                             <NavItem id="dashboard" icon="layout-grid" />
                             <NavItem id="map" icon="map" />
                             <NavItem id="rank" icon="award" />
+                            <NavItem id="analytics" icon="bar-chart-3" />
+                            <NavItem id="admin" icon="settings" />
                         </aside>
 
                         {/* Mobile Bottom Nav */}
@@ -266,6 +2380,8 @@
                             <NavItem id="dashboard" icon="layout-grid" />
                             <NavItem id="map" icon="map" />
                             <NavItem id="rank" icon="award" />
+                            <NavItem id="analytics" icon="bar-chart-3" />
+                            <NavItem id="admin" icon="settings" />
                         </nav>
 
                         {/* Main Body */}
@@ -283,7 +2399,7 @@
                                 <div className="max-w-5xl mx-auto space-y-6">
                                     <h2 className="text-lg font-bold mono border-b border-white/10 pb-4">ACTIVE_SIMULATIONS</h2>
                                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                                        {SCENARIOS.map(s => (
+                                        {visibleScenarios.map(s => (
                                             <div key={s.id} onClick={() => startSim(s)} className="glass p-5 rounded border border-white/5 hover:border-sky-500/50 cursor-pointer transition-all group">
                                                 <div className="flex justify-between items-center mb-3">
                                                     <span className="text-[9px] mono p-1 px-2 rounded bg-sky-500/10 text-sky-400 border border-sky-500/20">{s.difficulty}</span>
@@ -300,7 +2416,7 @@
                             {view === 'map' && (
                                 <div className="max-w-3xl mx-auto space-y-4">
                                     <h2 className="text-lg font-bold mono border-b border-white/10 pb-4">MISSION_LOG</h2>
-                                    {SCENARIOS.map((s, i) => (
+                                    {visibleScenarios.map((s, i) => (
                                         <div key={s.id} onClick={() => startSim(s)} className="glass p-4 rounded flex items-center gap-4 md:gap-6 border border-white/5 cursor-pointer hover:bg-white/5">
                                             <span className="mono text-xl md:text-2xl font-bold text-white/10">{String(i+1).padStart(2,'0')}</span>
                                             <div className="flex-1">
@@ -319,7 +2435,9 @@
                                         <div className="w-20 h-20 bg-sky-500/10 rounded-full flex items-center justify-center mx-auto mb-6 border border-sky-500/30">
                                             <i data-lucide="award" className="w-10 h-10 text-sky-400"></i>
                                         </div>
-                                        <h3 className="text-2xl font-bold mb-1">{getRank(gameState.xp).split(' · ')[1]}</h3>
+                                        <h3 className="text-2xl font-bold mb-1">
+                                            {labels[0]?.name || getRank(gameState.xp).split(' · ')[1]}
+                                        </h3>
                                         <p className="text-[10px] text-white/30 mono uppercase tracking-[0.2em] mb-8">Career Status Dossier</p>
                                         <div className="grid grid-cols-2 gap-4">
                                             <div className="bg-white/5 p-4 rounded">
@@ -330,8 +2448,528 @@
                                                 <p className="text-[9px] mono text-white/30 mb-1">NODES_SOLVED</p>
                                                 <p className="text-xl font-bold">{Object.keys(gameState.completed).length}</p>
                                             </div>
+                                            <div className="bg-white/5 p-4 rounded col-span-2">
+                                                <p className="text-[9px] mono text-white/30 mb-1">LABELS_OF_EXCELLENCE</p>
+                                                <p className="text-xs font-semibold">
+                                                    {labels.length === 0 ? "No labels awarded yet." : labels.map(l => l.name).join(" · ")}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        {labels[0] && (
+                                            <div className="mt-8 text-left space-y-4">
+                                                <div className="bg-white/5 p-4 rounded">
+                                                    <p className="text-[9px] mono text-white/30 mb-1">WHY_YOU_HOLD_THIS_LABEL</p>
+                                                    <p className="text-xs text-white/80 leading-relaxed">
+                                                        {labels[0].explanation}
+                                                    </p>
+                                                </div>
+                                                <div className="bg-white/5 p-4 rounded">
+                                                    <p className="text-[9px] mono text-white/30 mb-1">WHAT_TO_DO_NEXT</p>
+                                                    <p className="text-xs text-white/80 leading-relaxed">
+                                                        {labels[0].nextSteps}
+                                                    </p>
+                                                </div>
+                                            </div>
+                                        )}
+                                        {competencySummaries.length > 0 && (
+                                            <div className="mt-6 text-left">
+                                                <p className="text-[9px] mono text-white/30 mb-2">EVIDENCE_SNAPSHOT</p>
+                                                <div className="space-y-2">
+                                                    {competencySummaries.map((entry) => (
+                                                        <div key={entry.id} className="flex items-center justify-between text-[11px]">
+                                                            <span className="text-white/70">{entry.label}</span>
+                                                            <span className="mono text-white/40">x{entry.count}</span>
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {view === 'analytics' && (
+                                <AnalyticsView
+                                    state={analyticsState}
+                                    onReload={async () => {
+                                        if (!user || !window.fb || !window.fb.db || !window.fb.getDocs || !window.fb.collection) {
+                                            setAnalyticsState((previous) => ({
+                                                ...previous,
+                                                error: "User or Firestore client not ready."
+                                            }));
+                                            return;
+                                        }
+                                        try {
+                                            setAnalyticsState((previous) => ({
+                                                ...previous,
+                                                loading: true,
+                                                error: null
+                                            }));
+                                            const eventsCollectionRef = window.fb.collection(
+                                                window.fb.db,
+                                                "events",
+                                                window.__app_id,
+                                                "users",
+                                                user.uid
+                                            );
+                                            const snapshot = await window.fb.getDocs(eventsCollectionRef);
+                                            const scenarioAccumulator = {};
+                                            const variantAccumulator = {};
+                                            let started = 0;
+                                            let completed = 0;
+
+                                            snapshot.forEach((docSnap) => {
+                                                const data = docSnap.data() || {};
+                                                const eventType = data.type;
+                                                const scenarioId =
+                                                    data.scenarioId ||
+                                                    (data.payload && data.payload.scenarioId) ||
+                                                    "unknown";
+                                                const title =
+                                                    (data.payload && data.payload.title) ||
+                                                    scenarioId;
+
+                                                if (!scenarioAccumulator[scenarioId]) {
+                                                    scenarioAccumulator[scenarioId] = {
+                                                        scenarioId,
+                                                        title,
+                                                        started: 0,
+                                                        completed: 0
+                                                    };
+                                                }
+
+                                                if (eventType === "mission_start") {
+                                                    scenarioAccumulator[scenarioId].started += 1;
+                                                    started += 1;
+                                                }
+                                                if (eventType === "mission_complete") {
+                                                    scenarioAccumulator[scenarioId].completed += 1;
+                                                    completed += 1;
+                                                }
+
+                                                const experiments = data.experiments && typeof data.experiments === "object"
+                                                    ? data.experiments
+                                                    : null;
+
+                                                if (!experiments) {
+                                                    return;
+                                                }
+
+                                                const xpBeforeTop = typeof data.xpBefore === "number" ? data.xpBefore : null;
+                                                const xpAfterTop = typeof data.xpAfter === "number" ? data.xpAfter : null;
+                                                const payload = data.payload && typeof data.payload === "object" ? data.payload : {};
+                                                const xpBeforePayload = typeof payload.xpBefore === "number" ? payload.xpBefore : null;
+                                                const xpAfterPayload = typeof payload.xpAfter === "number" ? payload.xpAfter : null;
+
+                                                const xpBefore = xpBeforeTop !== null ? xpBeforeTop : xpBeforePayload;
+                                                const xpAfter = xpAfterTop !== null ? xpAfterTop : xpAfterPayload;
+
+                                                Object.keys(experiments).forEach((experimentId) => {
+                                                    const variantId = experiments[experimentId];
+                                                    if (!variantId) {
+                                                        return;
+                                                    }
+                                                    const key = `${experimentId}::${scenarioId}::${variantId}`;
+                                                    if (!variantAccumulator[key]) {
+                                                        variantAccumulator[key] = {
+                                                            experimentId,
+                                                            scenarioId,
+                                                            variantId,
+                                                            title,
+                                                            started: 0,
+                                                            completed: 0,
+                                                            totalXpDelta: 0,
+                                                            completedCount: 0
+                                                        };
+                                                    }
+
+                                                    if (eventType === "mission_start") {
+                                                        variantAccumulator[key].started += 1;
+                                                    }
+                                                    if (eventType === "mission_complete") {
+                                                        variantAccumulator[key].completed += 1;
+                                                        if (typeof xpBefore === "number" && typeof xpAfter === "number") {
+                                                            const delta = xpAfter - xpBefore;
+                                                            variantAccumulator[key].totalXpDelta += delta;
+                                                            variantAccumulator[key].completedCount += 1;
+                                                        }
+                                                    }
+                                                });
+                                            });
+
+                                            const scenarioStats = Object.values(scenarioAccumulator).sort(
+                                                (a, b) => (b.started || 0) - (a.started || 0)
+                                            );
+
+                                            const variantStats = Object.values(variantAccumulator).map((entry) => {
+                                                const averageDelta = entry.completedCount > 0
+                                                    ? entry.totalXpDelta / entry.completedCount
+                                                    : null;
+                                                return {
+                                                    experimentId: entry.experimentId,
+                                                    scenarioId: entry.scenarioId,
+                                                    variantId: entry.variantId,
+                                                    title: entry.title,
+                                                    started: entry.started,
+                                                    completed: entry.completed,
+                                                    avgXpDelta: averageDelta
+                                                };
+                                            }).sort((a, b) => {
+                                                if (a.experimentId !== b.experimentId) {
+                                                    return a.experimentId.localeCompare(b.experimentId);
+                                                }
+                                                if (a.scenarioId !== b.scenarioId) {
+                                                    return a.scenarioId.localeCompare(b.scenarioId);
+                                                }
+                                                return a.variantId.localeCompare(b.variantId);
+                                            });
+
+                                            setAnalyticsState({
+                                                loading: false,
+                                                error: null,
+                                                scenarioStats,
+                                                totalStarted: started,
+                                                totalCompleted: completed,
+                                                variantStats
+                                            });
+                                        } catch (error) {
+                                            setAnalyticsState({
+                                                loading: false,
+                                                error: "Failed to load analytics.",
+                                                scenarioStats: [],
+                                                totalStarted: 0,
+                                                totalCompleted: 0,
+                                                variantStats: []
+                                            });
+                                        }
+                                    }}
+                                />
+                            )}
+
+                            {view === 'admin' && (
+                                <div className="max-w-4xl mx-auto space-y-6 pt-4">
+                                    <h2 className="text-lg font-bold mono border-b border-white/10 pb-4">ADMIN_CONSOLE</h2>
+                                    <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                        <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">TENANT_COHORTS</h3>
+                                        <p className="text-[11px] text-white/40 mb-2">
+                                            Manage cohorts or organisations and attach different scenario packs and personas to each tenant.
+                                        </p>
+                                        <div className="flex flex-wrap gap-2 mb-3">
+                                            {Object.entries(adminConfig.tenants || {}).map(([tenantId, configForTenant]) => (
+                                                <button
+                                                    key={tenantId}
+                                                    onClick={() => {
+                                                        setAdminConfig((previousConfig) => {
+                                                            const nextConfig = {
+                                                                ...previousConfig,
+                                                                activeTenantId: tenantId,
+                                                                tenants: {
+                                                                    ...(previousConfig.tenants || {}),
+                                                                    [tenantId]: getTenantConfig({
+                                                                        ...previousConfig,
+                                                                        activeTenantId: tenantId
+                                                                    })
+                                                                }
+                                                            };
+                                                            saveAdminConfig(nextConfig);
+                                                            return nextConfig;
+                                                        });
+                                                    }}
+                                                    className={`px-3 py-1 text-[10px] mono rounded border ${
+                                                        (adminConfig.activeTenantId || DEFAULT_TENANT_ID) === tenantId
+                                                            ? "bg-sky-500/20 border-sky-500/60 text-sky-100"
+                                                            : "bg-white/5 border-white/20 text-white/40"
+                                                    }`}
+                                                >
+                                                    {(configForTenant && configForTenant.label) || tenantId}
+                                                </button>
+                                            ))}
+                                        </div>
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <input
+                                                value={newTenantName}
+                                                onChange={(event) => setNewTenantName(event.target.value)}
+                                                placeholder="Add new tenant or cohort label"
+                                                className="flex-1 bg-black/40 border border-white/10 rounded px-3 py-2 text-[11px] text-white/80 outline-none focus:border-sky-500/60"
+                                            />
+                                            <button
+                                                onClick={() => {
+                                                    const trimmedName = newTenantName.trim();
+                                                    if (!trimmedName) {
+                                                        return;
+                                                    }
+
+                                                    const baseId = trimmedName
+                                                        .toLowerCase()
+                                                        .replace(/[^a-z0-9]+/g, "_")
+                                                        .replace(/^_+|_+$/g, "");
+                                                    const generatedId = baseId || `tenant_${Date.now()}`;
+
+                                                    setAdminConfig((previousConfig) => {
+                                                        const tenants = previousConfig.tenants || {};
+
+                                                        if (tenants[generatedId]) {
+                                                            return previousConfig;
+                                                        }
+
+                                                        const nextTenants = {
+                                                            ...tenants,
+                                                            [generatedId]: createDefaultTenantConfig({
+                                                                label: trimmedName
+                                                            })
+                                                        };
+
+                                                        const nextConfig = {
+                                                            ...previousConfig,
+                                                            activeTenantId: generatedId,
+                                                            tenants: nextTenants
+                                                        };
+
+                                                        saveAdminConfig(nextConfig);
+                                                        return nextConfig;
+                                                    });
+
+                                                    setNewTenantName("");
+                                                }}
+                                                className="px-4 py-2 text-[11px] mono rounded border border-sky-500/60 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 transition-colors"
+                                            >
+                                                CREATE_TENANT
+                                            </button>
                                         </div>
                                     </div>
+                                    <div className="grid md:grid-cols-2 gap-4">
+                                        <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">MODULE_TOGGLES</h3>
+                                            {MODULES.map((m) => (
+                                                <div key={m.id} className="flex items-start justify-between gap-3 py-2 border-b border-white/5 last:border-b-0">
+                                                    <div>
+                                                        <p className="text-sm font-semibold">{m.name}</p>
+                                                        <p className="text-[10px] text-white/40">{m.description}</p>
+                                                    </div>
+                                                    <button
+                                                        onClick={() => {
+                                                            setAdminConfig((previousConfig) => {
+                                                                const activeTenantId = previousConfig.activeTenantId || DEFAULT_TENANT_ID;
+                                                                const previousTenantConfig = getTenantConfig(previousConfig);
+
+                                                                const updatedTenantConfig = {
+                                                                    ...previousTenantConfig,
+                                                                    modules: {
+                                                                        ...previousTenantConfig.modules,
+                                                                        [m.id]: !previousTenantConfig.modules[m.id]
+                                                                    }
+                                                                };
+
+                                                                const nextConfig = {
+                                                                    ...previousConfig,
+                                                                    activeTenantId: activeTenantId,
+                                                                    tenants: {
+                                                                        ...(previousConfig.tenants || {}),
+                                                                        [activeTenantId]: updatedTenantConfig
+                                                                    }
+                                                                };
+
+                                                                saveAdminConfig(nextConfig);
+                                                                return nextConfig;
+                                                            });
+                                                        }}
+                                                        className={`px-3 py-1 text-[10px] mono rounded border ${
+                                                            tenantConfig.modules[m.id]
+                                                                ? "bg-emerald-500/20 border-emerald-500/60 text-emerald-300"
+                                                                : "bg-white/5 border-white/20 text-white/40"
+                                                        }`}
+                                                    >
+                                                        {tenantConfig.modules[m.id] ? "ENABLED" : "DISABLED"}
+                                                    </button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                        <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">ACTIVE_PERSONA</h3>
+                                            <p className="text-[11px] text-white/40 mb-2">
+                                                Choose the primary AI persona that reacts to decisions in simulations.
+                                            </p>
+                                            <div className="space-y-2">
+                                                {PERSONAS.map((p) => (
+                                                    <button
+                                                        key={p.id}
+                                                        onClick={() => {
+                                                            setAdminConfig((previousConfig) => {
+                                                                const activeTenantId = previousConfig.activeTenantId || DEFAULT_TENANT_ID;
+                                                                const previousTenantConfig = getTenantConfig(previousConfig);
+
+                                                                const updatedTenantConfig = {
+                                                                    ...previousTenantConfig,
+                                                                    activePersonaId: p.id
+                                                                };
+
+                                                                const nextConfig = {
+                                                                    ...previousConfig,
+                                                                    activeTenantId: activeTenantId,
+                                                                    tenants: {
+                                                                        ...(previousConfig.tenants || {}),
+                                                                        [activeTenantId]: updatedTenantConfig
+                                                                    }
+                                                                };
+
+                                                                saveAdminConfig(nextConfig);
+                                                                return nextConfig;
+                                                            });
+                                                        }}
+                                                        className={`w-full text-left text-[11px] px-3 py-2 rounded border ${
+                                                            tenantConfig.activePersonaId === p.id
+                                                                ? "border-emerald-500/60 bg-emerald-500/10 text-emerald-100"
+                                                                : "border-white/10 bg-white/0 text-white/40"
+                                                        }`}
+                                                    >
+                                                        <div className="font-semibold">{p.label}</div>
+                                                        <div className="text-[10px] text-white/40">
+                                                            {p.role} · {p.tone}
+                                                        </div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                        </div>
+                                        <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">SCENARIO_LIBRARY</h3>
+                                            <p className="text-[11px] text-white/40 mb-2">
+                                                Select which scenarios you want to explicitly enable. If none are selected, all scenarios remain available.
+                                            </p>
+                                            <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
+                                                {allScenarios.map((s) => {
+                                                    const enabledSet = tenantConfig.enabledScenarioIds;
+                                                    const isExplicit = Array.isArray(enabledSet) && enabledSet.length > 0;
+                                                    const isActive = !isExplicit || enabledSet.includes(s.id);
+                                                    return (
+                                                        <button
+                                                            key={s.id}
+                                                            onClick={() => {
+                                                                setAdminConfig((previousConfig) => {
+                                                                    const activeTenantId = previousConfig.activeTenantId || DEFAULT_TENANT_ID;
+                                                                    const previousTenantConfig = getTenantConfig(previousConfig);
+
+                                                                    const current = Array.isArray(previousTenantConfig.enabledScenarioIds)
+                                                                        ? previousTenantConfig.enabledScenarioIds
+                                                                        : [];
+
+                                                                    const nextList = current.includes(s.id)
+                                                                        ? current.filter((id) => id !== s.id)
+                                                                        : current.concat(s.id);
+
+                                                                    const updatedTenantConfig = {
+                                                                        ...previousTenantConfig,
+                                                                        enabledScenarioIds: nextList
+                                                                    };
+
+                                                                    const nextConfig = {
+                                                                        ...previousConfig,
+                                                                        activeTenantId: activeTenantId,
+                                                                        tenants: {
+                                                                            ...(previousConfig.tenants || {}),
+                                                                            [activeTenantId]: updatedTenantConfig
+                                                                        }
+                                                                    };
+
+                                                                    saveAdminConfig(nextConfig);
+                                                                    return nextConfig;
+                                                                });
+                                                            }}
+                                                            className={`w-full text-left text-[11px] px-3 py-2 rounded border ${
+                                                                isActive
+                                                                    ? "border-sky-500/40 bg-sky-500/10 text-sky-100"
+                                                                    : "border-white/10 bg-white/0 text-white/30"
+                                                            }`}
+                                                        >
+                                                            <span className="mono mr-2 text-white/30">{s.id}</span>
+                                                            {s.title}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                        <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                            <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">EXPERIMENT_TRACKS</h3>
+                                            <p className="text-[11px] text-white/40 mb-2">
+                                                Opt this tenant into data-driven experiments. Variants are assigned automatically per user or tenant based on the experiment design.
+                                            </p>
+                                            <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
+                                                {EXPERIMENTS.map((exp) => {
+                                                    const optInIds = Array.isArray(tenantConfig.experimentOptInIds)
+                                                        ? tenantConfig.experimentOptInIds
+                                                        : [];
+                                                    const isOptedIn = optInIds.includes(exp.id);
+                                                    return (
+                                                        <button
+                                                            key={exp.id}
+                                                            onClick={() => {
+                                                                setAdminConfig((previousConfig) => {
+                                                                    const activeTenantId = previousConfig.activeTenantId || DEFAULT_TENANT_ID;
+                                                                    const previousTenantConfig = getTenantConfig(previousConfig);
+
+                                                                    const currentOptIn = Array.isArray(previousTenantConfig.experimentOptInIds)
+                                                                        ? previousTenantConfig.experimentOptInIds
+                                                                        : [];
+
+                                                                    const nextOptIn = currentOptIn.includes(exp.id)
+                                                                        ? currentOptIn.filter((id) => id !== exp.id)
+                                                                        : currentOptIn.concat(exp.id);
+
+                                                                    const updatedTenantConfig = {
+                                                                        ...previousTenantConfig,
+                                                                        experimentOptInIds: nextOptIn
+                                                                    };
+
+                                                                    const nextConfig = {
+                                                                        ...previousConfig,
+                                                                        activeTenantId: activeTenantId,
+                                                                        tenants: {
+                                                                            ...(previousConfig.tenants || {}),
+                                                                            [activeTenantId]: updatedTenantConfig
+                                                                        }
+                                                                    };
+
+                                                                    saveAdminConfig(nextConfig);
+                                                                    return nextConfig;
+                                                                });
+                                                            }}
+                                                            className={`w-full text-left text-[11px] px-3 py-2 rounded border ${
+                                                                isOptedIn
+                                                                    ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-100"
+                                                                    : "border-white/10 bg-white/0 text-white/30"
+                                                            }`}
+                                                        >
+                                                            <div className="flex items-center justify-between gap-2">
+                                                                <div>
+                                                                    <span className="mono mr-2 text-white/30">{exp.id}</span>
+                                                                    <span className="font-semibold">{exp.label}</span>
+                                                                </div>
+                                                                <span className="mono text-[10px] text-white/40">
+                                                                    {isOptedIn ? "ENROLLED" : "NOT_ENROLLED"}
+                                                                </span>
+                                                            </div>
+                                                            {exp.description && (
+                                                                <p className="text-[10px] text-white/40 mt-1">
+                                                                    {exp.description}
+                                                                </p>
+                                                            )}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <ScenarioEditorPanel
+                                        allScenarios={allScenarios}
+                                        onImportScenario={(scenario) => {
+                                            setCustomScenarios((previous) => {
+                                                const existing = Array.isArray(previous) ? previous : [];
+                                                const without = existing.filter((entry) => entry && entry.id !== scenario.id);
+                                                const next = [...without, scenario];
+                                                saveCustomScenarios(next);
+                                                return next;
+                                            });
+                                        }}
+                                    />
                                 </div>
                             )}
 
@@ -349,10 +2987,21 @@
                                                 {currentSim.nodes[currentNode].scene}
                                             </p>
 
-                                            {aiFeedback && (
-                                                <div className="bg-sky-500/5 border border-sky-500/20 p-4 rounded-md mb-8 animate-in fade-in">
-                                                    <p className="text-[9px] font-bold text-sky-400 mono mb-2">MENTOR_EVALUATION</p>
-                                                    <p className="text-xs italic text-white/70 leading-relaxed">{aiFeedback}</p>
+                                            {Array.isArray(aiFeedback) && aiFeedback.length > 0 && (
+                                                <div className="space-y-3 mb-8">
+                                                    {aiFeedback.map((entry) => (
+                                                        <div
+                                                            key={`${entry.personaId}-${entry.heading}`}
+                                                            className="bg-sky-500/5 border border-sky-500/20 p-4 rounded-md animate-in fade-in"
+                                                        >
+                                                            <p className="text-[9px] font-bold text-sky-400 mono mb-2">
+                                                                {entry.heading}
+                                                            </p>
+                                                            <p className="text-xs italic text-white/70 leading-relaxed">
+                                                                {entry.text}
+                                                            </p>
+                                                        </div>
+                                                    ))}
                                                 </div>
                                             )}
 
@@ -381,6 +3030,54 @@
                                                 {history.length === 0 && <p className="text-[10px] text-white/10 mono italic">No steps recorded.</p>}
                                             </div>
                                         </div>
+
+                                        {integrationState.status !== "idle" && (
+                                            <div className="glass p-5 rounded-lg border border-white/10">
+                                                <h4 className="text-[9px] mono text-white/30 uppercase mb-3 tracking-widest">
+                                                    External_Data · {integrationState.status === "loading" ? "Fetching" : "Snapshot"}
+                                                </h4>
+
+                                                {integrationState.status === "loading" && (
+                                                    <p className="text-[10px] text-white/40">
+                                                        Fetching a deterministic external data snapshot for this step…
+                                                    </p>
+                                                )}
+
+                                                {integrationState.status === "error" && (
+                                                    <p className="text-[10px] text-amber-300">
+                                                        External data is not available. The simulation has fallen back to safe offline/demo mode.
+                                                    </p>
+                                                )}
+
+                                                {integrationState.status === "ready" && integrationState.payload && (
+                                                    <div className="space-y-2">
+                                                        {Object.values(integrationState.payload).map((entry, index) => (
+                                                            <div key={index} className="border-l border-white/10 pl-3">
+                                                                <p className="text-[9px] mono text-white/40 mb-1 uppercase">
+                                                                    {entry.snapshot && entry.snapshot.title ? entry.snapshot.title : "Snapshot"}
+                                                                </p>
+                                                                <p className="text-[10px] text-white/60">
+                                                                    {entry.snapshot && entry.snapshot.narrative
+                                                                        ? entry.snapshot.narrative
+                                                                        : "Deterministic demo data from the TI console."}
+                                                                </p>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        <ToolsPanel
+                                            meta={gameState.meta || createMeta()}
+                                            onApplyScenario={(effects) => {
+                                                setGameState(prev => {
+                                                    const currentMeta = prev.meta || createMeta();
+                                                    const nextMeta = applyEffectsToMeta(currentMeta, effects);
+                                                    return { ...prev, meta: nextMeta };
+                                                });
+                                            }}
+                                        />
                                     </div>
                                 </div>
                             )}
