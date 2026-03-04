@@ -563,6 +563,46 @@
             }
         };
 
+        const PlatformClient = {
+            getProfile: async (appId, userId) => {
+                if (!userId || !window.fb || !window.fb.db) {
+                    return mergeProfileData(null);
+                }
+                try {
+                    const snap = await window.fb.getDoc(
+                        window.fb.doc(window.fb.db, "artifacts", appId, "users", userId, "profile")
+                    );
+                    if (snap.exists()) {
+                        return mergeProfileData(snap.data());
+                    }
+                } catch (error) {
+                    // fall through to default
+                }
+                return mergeProfileData(null);
+            },
+            updateProfile: async (appId, userId, profilePatch) => {
+                if (!userId || !window.fb || !window.fb.db) {
+                    return;
+                }
+                const safePatch = profilePatch && typeof profilePatch === "object" ? profilePatch : {};
+                try {
+                    await window.fb.setDoc(
+                        window.fb.doc(window.fb.db, "artifacts", appId, "users", userId, "profile"),
+                        safePatch,
+                        { merge: true }
+                    );
+                } catch (error) {
+                    // best-effort only
+                }
+            },
+            logEvent: async (userId, type, payload, context) => {
+                await logEvent(userId, type, payload, context);
+            },
+            getMentorFeedback: async (prompt) => {
+                return callGemini(prompt);
+            }
+        };
+
         const computeLabels = (xp, completedCount, competencyEvidence) => {
             const labels = [];
             const evidenceEntries = competencyEvidence ? Object.values(competencyEvidence) : [];
@@ -1235,6 +1275,9 @@
                 xpReward: 260,
                 mode: "team",
                 requiresModuleId: "team_mode",
+                tools: {
+                    enabledToolIds: ["headcount_planner", "market_visualizer", "evidence_board"]
+                },
                 brief: "You lead a small virtual TI squad (mentor, peer, boss) through a messy, multi-step market intelligence response where alignment, disagreement, and escalation all matter. Every decision advances the simulation timeline and shifts organisational risk and trust that will carry into future missions.",
                 nodes: {
                     start: {
@@ -1656,23 +1699,21 @@
             useEffect(() => {
                 const { auth, onAuthStateChanged, signInAnonymously } = window.fb;
                 onAuthStateChanged(auth, async (u) => {
-                    if (u) { setUser(u); loadProfile(u.uid); }
-                    else { await signInAnonymously(auth); }
+                    if (u) {
+                        setUser(u);
+                        await loadProfile(u.uid);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
                 });
             }, []);
 
             const loadProfile = async (uid) => {
-                const snap = await window.fb.getDoc(window.fb.doc(window.fb.db, 'artifacts', window.__app_id, 'users', uid, 'profile'));
-                if (snap.exists()) {
-                    const data = mergeProfileData(snap.data());
-                    setGameState(data);
-                    const completedCount = Object.keys(data.completed || {}).length;
-                    const evidence = data.competencyEvidence || {};
-                    setLabels(computeLabels(data.xp, completedCount, evidence));
-                } else {
-                    setGameState(mergeProfileData(null));
-                    setLabels([]);
-                }
+                const data = await PlatformClient.getProfile(window.__app_id, uid);
+                setGameState(data);
+                const completedCount = Object.keys(data.completed || {}).length;
+                const evidence = data.competencyEvidence || {};
+                setLabels(computeLabels(data.xp, completedCount, evidence));
             };
 
             const startSim = (sim) => {
@@ -1715,7 +1756,7 @@
                     }, []);
 
                     if (Object.keys(experimentsForMission).length > 0) {
-                        logEvent(
+                        PlatformClient.logEvent(
                             user.uid,
                             "experiment_assignment",
                             {
@@ -1728,7 +1769,7 @@
                         );
                     }
 
-                    logEvent(
+                    PlatformClient.logEvent(
                         user.uid,
                         "mission_start",
                         {
@@ -1795,7 +1836,7 @@ Current trust score with you (range -100 to 100): ${trustScoreRaw}.
 Provide feedback in a maximum of 2 sentences from this persona's point of view.
 Focus on decision quality, trade-offs, and how this choice affects long-term trust and team dynamics.`;
 
-                        const text = await callGemini(prompt);
+                        const text = await PlatformClient.getMentorFeedback(prompt);
                         if (text) {
                             feedbackEntries.push({
                                 personaId: persona.id,
@@ -1817,7 +1858,7 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                         tenantConfig
                     });
 
-                    logEvent(
+                    PlatformClient.logEvent(
                         user.uid,
                         "decision_made",
                         {
@@ -1848,10 +1889,10 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                     const previousLabels = Array.isArray(labels) ? labels : [];
                     setLabels(nextLabels);
                     if (user) {
-                        window.fb.setDoc(
-                            window.fb.doc(window.fb.db, 'artifacts', window.__app_id, 'users', user.uid, 'profile'),
-                            { xp: newXp, completed: newComp, labels: nextLabels, meta: nextMeta, competencyEvidence: nextCompetencyEvidence },
-                            { merge: true }
+                        PlatformClient.updateProfile(
+                            window.__app_id,
+                            user.uid,
+                            { xp: newXp, completed: newComp, labels: nextLabels, meta: nextMeta, competencyEvidence: nextCompetencyEvidence }
                         );
                     }
                     if (user) {
@@ -1879,7 +1920,7 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                             tenantConfig
                         });
 
-                        logEvent(
+                        PlatformClient.logEvent(
                             user.uid,
                             "mission_complete",
                             {
