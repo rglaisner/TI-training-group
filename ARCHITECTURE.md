@@ -17,11 +17,13 @@
 - **Scenario / Mission (`SCENARIOS`)**
   - `id`, `title`, `subtitle`, `difficulty`, `accent`, `xpReward`, `brief`.
   - `nodes`: map of node id → `{ scene, choices?, isEnd? }`.
+  - Optional `tools.enabledToolIds`: `string[]` — limits which tools appear in the sidebar for this mission; if absent, all default tools are available. Used by `getToolsForScenario`.
   - Behaves as a mission/arc consisting of multiple decision nodes.
 
 - **Node**
   - Represents a single point in the storyline.
   - `scene`: narrative text presented to the user.
+  - Optional `externalData.requests`: array of per-node external data requests (e.g. for Market & Comp Visualizer); structure is node-level, consumed by tools; SDL loaders may populate this. No fetcher implementation required for MVP.
   - `choices`: array of structured actions:
     - `text`: what the user selects.
     - `next`: id of the next node.

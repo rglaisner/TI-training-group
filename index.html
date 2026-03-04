@@ -300,20 +300,19 @@
             return TOOL_DEFINITIONS.find((tool) => tool.id === toolId) || null;
         };
 
-        const getToolsForScenario = (scenario) => {
-            if (!scenario || !scenario.tools || !Array.isArray(scenario.tools.enabledToolIds)) {
-                return DEFAULT_TOOL_IDS;
+        const getToolsForScenario = (scenario, options) => {
+            const isHighRisk = options && options.isHighRiskScenario === true;
+            let baseIds = DEFAULT_TOOL_IDS;
+            if (scenario && scenario.tools && Array.isArray(scenario.tools.enabledToolIds)) {
+                const enabled = scenario.tools.enabledToolIds.filter((toolId) =>
+                    TOOL_DEFINITIONS.some((tool) => tool.id === toolId)
+                );
+                baseIds = enabled.length > 0 ? enabled : DEFAULT_TOOL_IDS;
             }
-
-            const enabled = scenario.tools.enabledToolIds.filter((toolId) =>
-                TOOL_DEFINITIONS.some((tool) => tool.id === toolId)
-            );
-
-            if (enabled.length === 0) {
-                return DEFAULT_TOOL_IDS;
+            if (isHighRisk && !baseIds.includes("evidence_board")) {
+                return [...baseIds, "evidence_board"];
             }
-
-            return enabled;
+            return baseIds;
         };
 
         const ADMIN_STORAGE_KEY_V1 = "ti_admin_config_v1";
@@ -501,6 +500,8 @@
             return match || fallback;
         };
 
+        // Event schema v1: optional top-level fields (tenantId, cohortIds, governanceContext, experiments)
+        // are additive; readers must treat missing values as "unknown" and must not fail on absent fields.
         const logEvent = async (userId, type, payload, context) => {
             if (!userId || !window.fb || !window.fb.db) {
                 return;
@@ -537,6 +538,10 @@
                 const tenantId = typeof safeContext.tenantId === "string" && safeContext.tenantId
                     ? safeContext.tenantId
                     : null;
+                const cohortIds = Array.isArray(safeContext.cohortIds) ? safeContext.cohortIds : null;
+                const governanceContext = safeContext.governanceContext && typeof safeContext.governanceContext === "object"
+                    ? safeContext.governanceContext
+                    : null;
                 const experiments = safeContext.experiments && typeof safeContext.experiments === "object"
                     ? safeContext.experiments
                     : null;
@@ -552,6 +557,8 @@
                 if (competencyDeltas) baseDoc.competencyDeltas = competencyDeltas;
                 if (scenarioTags) baseDoc.scenarioTags = scenarioTags;
                 if (tenantId) baseDoc.tenantId = tenantId;
+                if (cohortIds && cohortIds.length > 0) baseDoc.cohortIds = cohortIds;
+                if (governanceContext && Object.keys(governanceContext).length > 0) baseDoc.governanceContext = governanceContext;
                 if (experiments && Object.keys(experiments).length > 0) baseDoc.experiments = experiments;
 
                 await window.fb.setDoc(
@@ -563,7 +570,127 @@
             }
         };
 
+        const getScenarioTagsFromScenario = (scenario) => {
+            if (!scenario || !scenario.nodes || typeof scenario.nodes !== "object") {
+                return [];
+            }
+            const tags = [];
+            Object.values(scenario.nodes).forEach((node) => {
+                if (!node || !Array.isArray(node.choices)) return;
+                node.choices.forEach((choiceEntry) => {
+                    if (choiceEntry && typeof choiceEntry.tag === "string" && !tags.includes(choiceEntry.tag)) {
+                        tags.push(choiceEntry.tag);
+                    }
+                });
+            });
+            return tags;
+        };
+
         const PlatformClient = {
+            startMission: async (request) => {
+                const appId = request && request.appId;
+                const userId = request && request.userId;
+                const scenarioId = request && request.scenarioId;
+                const scenario = (request && request.scenario) || (typeof SCENARIOS !== "undefined" && SCENARIOS.find((s) => s && s.id === scenarioId));
+                if (!appId || !scenarioId || !scenario || !scenario.nodes) {
+                    return { sessionId: null, node: null, profile: mergeProfileData(null), labels: [] };
+                }
+                const firstNodeId = "start";
+                const node = scenario.nodes[firstNodeId];
+                if (!node) {
+                    return { sessionId: null, node: null, profile: mergeProfileData(null), labels: [] };
+                }
+                const sessionId = (request && request.sessionId) || `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                const profile = await PlatformClient.getProfile(appId, userId);
+                const completedCount = Object.keys(profile.completed || {}).length;
+                const labels = computeLabels(profile.xp, completedCount, profile.competencyEvidence);
+                const labelIds = labels.map((l) => l && l.id).filter(Boolean);
+                const scenarioTags = getScenarioTagsFromScenario(scenario);
+                if (userId) {
+                    const payload = {
+                        scenarioId,
+                        title: scenario.title || scenarioId,
+                        xpBefore: profile.xp,
+                        xpAfter: profile.xp,
+                        labelsBefore: labelIds,
+                        labelsAfter: labelIds,
+                        scenarioTags
+                    };
+                    const context = { tenantId: (request && request.tenantId) || null, experiments: (request && request.experiments && typeof request.experiments === "object") ? request.experiments : null };
+                    await PlatformClient.logEvent(userId, "mission_start", payload, context);
+                }
+                return { sessionId, node, profile, labels, scenario, firstNodeId };
+            },
+            submitDecision: async (request) => {
+                const appId = request && request.appId;
+                const userId = request && request.userId;
+                const scenarioId = request && request.scenarioId;
+                const nodeId = request && request.nodeId;
+                const choice = request && request.choice;
+                const profile = request && request.profile;
+                const history = request && request.history;
+                const scenario = (request && request.scenario) || (typeof SCENARIOS !== "undefined" && SCENARIOS.find((s) => s && s.id === scenarioId));
+                if (!appId || !scenarioId || !scenario || !scenario.nodes || !choice || !profile) {
+                    return { nextNode: null, profile: profile || mergeProfileData(null), labels: [], terminal: true };
+                }
+                const nextNode = scenario.nodes[choice.next];
+                const terminal = nextNode && nextNode.isEnd === true;
+                const nextHistory = Array.isArray(history) ? [...history, { choice: choice.text, tag: choice.tag }] : [{ choice: choice.text, tag: choice.tag }];
+                if (userId) {
+                    const payload = {
+                        scenarioId,
+                        nodeId: nodeId || null,
+                        choiceText: choice.text,
+                        tag: choice.tag || null,
+                        competencyIds: getCompetencyIdsForTag(choice.tag)
+                    };
+                    const context = { tenantId: (request && request.tenantId) || null, experiments: (request && request.experiments && typeof request.experiments === "object") ? request.experiments : null };
+                    await PlatformClient.logEvent(userId, "decision_made", payload, context);
+                }
+                if (terminal) {
+                    const xpAwarded = typeof choice.xp === "number" ? choice.xp : 30;
+                    const newXp = (profile.xp || 0) + xpAwarded;
+                    const newCompleted = { ...(profile.completed || {}), [scenarioId]: true };
+                    const nextMeta = applyEffectsToMeta(profile.meta, choice.effects);
+                    const nextCompetencyEvidence = updateCompetencyEvidence(profile.competencyEvidence || {}, scenarioId, nextHistory);
+                    const updated = { xp: newXp, completed: newCompleted, meta: nextMeta, competencyEvidence: nextCompetencyEvidence };
+                    const completedCount = Object.keys(newCompleted).length;
+                    const nextLabels = computeLabels(newXp, completedCount, nextCompetencyEvidence);
+                    if (userId) {
+                        await PlatformClient.updateProfile(appId, userId, { xp: newXp, completed: newCompleted, labels: nextLabels, meta: nextMeta, competencyEvidence: nextCompetencyEvidence });
+                    }
+                    if (userId) {
+                        const evidenceForEvent = getCompetencySummaries(nextCompetencyEvidence);
+                        const evidenceCoverage = evidenceForEvent.length;
+                        const evidenceDecisionCount = evidenceForEvent.reduce((total, entry) => total + (entry && entry.count ? entry.count : 0), 0);
+                        const labelIdsBefore = (request.labelsBefore || []).map((l) => l && l.id).filter(Boolean);
+                        const labelIdsAfter = nextLabels.map((l) => l && l.id).filter(Boolean);
+                        const scenarioTags = getScenarioTagsFromScenario(scenario);
+                        const payload = {
+                            scenarioId,
+                            title: scenario.title || scenarioId,
+                            xpAwarded,
+                            totalXp: newXp,
+                            xpBefore: profile.xp,
+                            xpAfter: newXp,
+                            labelsBefore: labelIdsBefore,
+                            labelsAfter: labelIdsAfter,
+                            scenarioTags,
+                            labels: labelIdsAfter,
+                            competencyEvidenceCoverage: evidenceCoverage,
+                            competencyEvidenceDecisions: evidenceDecisionCount
+                        };
+                        const context = { tenantId: (request && request.tenantId) || null, experiments: (request && request.experiments && typeof request.experiments === "object") ? request.experiments : null };
+                        await PlatformClient.logEvent(userId, "mission_complete", payload, context);
+                    }
+                    return { nextNode: null, profile: updated, labels: nextLabels, terminal: true };
+                }
+                const nextMeta = applyEffectsToMeta(profile.meta, choice.effects);
+                const updated = { ...profile, meta: nextMeta };
+                const completedCount = Object.keys(profile.completed || {}).length;
+                const currentLabels = computeLabels(profile.xp, completedCount, profile.competencyEvidence);
+                return { nextNode, profile: updated, labels: currentLabels, terminal: false };
+            },
             getProfile: async (appId, userId) => {
                 if (!userId || !window.fb || !window.fb.db) {
                     return mergeProfileData(null);
@@ -600,6 +727,73 @@
             },
             getMentorFeedback: async (prompt) => {
                 return callGemini(prompt);
+            }
+        };
+
+        const HIGH_RISK_GOVERNANCE_TAGS = ["bias_sensitive", "pii_adjacent", "high_impact_label"];
+
+        const getScenarioGovernance = async (appId, scenarioId) => {
+            if (!appId || !scenarioId || typeof scenarioId !== "string") {
+                return null;
+            }
+            if (!window.fb || !window.fb.db || !window.fb.getDoc || !window.fb.doc) {
+                return null;
+            }
+            try {
+                const ref = window.fb.doc(window.fb.db, "governance", appId, "scenarios", scenarioId);
+                const snap = await window.fb.getDoc(ref);
+                if (!snap || !snap.exists()) {
+                    return null;
+                }
+                const data = snap.data();
+                if (!data || typeof data !== "object") {
+                    return null;
+                }
+                return {
+                    scenarioId: data.scenarioId || scenarioId,
+                    governanceStatus: data.governanceStatus || "draft",
+                    releaseChannel: data.releaseChannel || undefined,
+                    ownerUserId: data.ownerUserId,
+                    reviewerUserIds: Array.isArray(data.reviewerUserIds) ? data.reviewerUserIds : undefined,
+                    riskTags: Array.isArray(data.riskTags) ? data.riskTags : undefined,
+                    lastReviewedAt: data.lastReviewedAt,
+                    lastReviewedBy: data.lastReviewedBy,
+                    lastReviewSummary: data.lastReviewSummary,
+                    version: typeof data.version === "number" ? data.version : undefined
+                };
+            } catch (error) {
+                return null;
+            }
+        };
+
+        const isHighRiskScenario = (governance) => {
+            if (!governance || typeof governance !== "object") {
+                return false;
+            }
+            const tags = governance.riskTags;
+            if (!Array.isArray(tags) || tags.length === 0) {
+                return false;
+            }
+            return tags.some((tag) => typeof tag === "string" && HIGH_RISK_GOVERNANCE_TAGS.includes(tag));
+        };
+
+        const seedScenarioGovernance = async (appId, scenarioId, overrides) => {
+            if (!appId || !scenarioId || !window.fb || !window.fb.db || !window.fb.setDoc || !window.fb.doc) {
+                return false;
+            }
+            const doc = {
+                scenarioId,
+                governanceStatus: (overrides && overrides.governanceStatus) || "approved",
+                releaseChannel: (overrides && overrides.releaseChannel) || "ga",
+                riskTags: Array.isArray(overrides && overrides.riskTags) ? overrides.riskTags : [],
+                version: 1
+            };
+            try {
+                const ref = window.fb.doc(window.fb.db, "governance", appId, "scenarios", scenarioId);
+                await window.fb.setDoc(ref, doc, { merge: true });
+                return true;
+            } catch (error) {
+                return false;
             }
         };
 
@@ -1098,6 +1292,8 @@
         const compBenchService = createCompBenchService(INTEGRATION_CONFIG);
         const hrisService = createHrisService(INTEGRATION_CONFIG);
 
+        // Scenario shape: id, title, nodes (nodeId -> { scene, choices?, isEnd? }).
+        // Optional: scenario.tools.enabledToolIds (string[]); node.externalData.requests for tools (e.g. Market & Comp).
         const SCENARIOS = [
             {
                 id: "s8", title: "THE MANDATE", subtitle: "Defining Talent Intelligence",
@@ -1580,6 +1776,9 @@
                 variantStats: []
             });
             const [customScenarios, setCustomScenarios] = useState(() => loadCustomScenarios());
+            const [currentScenarioIsHighRisk, setCurrentScenarioIsHighRisk] = useState(false);
+            const [governanceByScenarioId, setGovernanceByScenarioId] = useState({});
+            const [governanceLoading, setGovernanceLoading] = useState(false);
 
             const tenantConfig = getTenantConfig(adminConfig);
             const allScenariosById = {};
@@ -1716,79 +1915,43 @@
                 setLabels(computeLabels(data.xp, completedCount, evidence));
             };
 
-            const startSim = (sim) => {
-                setCurrentSim(sim);
-                setCurrentNode('start');
+            const startSim = async (sim) => {
+                if (!sim || !sim.id) return;
+                const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                const experimentsForMission = user
+                    ? getActiveExperimentsForContext({ userId: user.uid, tenantId, scenarioId: sim.id, tenantConfig })
+                    : {};
+                const result = await PlatformClient.startMission({
+                    appId: window.__app_id,
+                    userId: user ? user.uid : null,
+                    scenarioId: sim.id,
+                    scenario: sim,
+                    tenantId,
+                    experiments: Object.keys(experimentsForMission).length > 0 ? experimentsForMission : null
+                });
+                setCurrentSim(result.scenario || sim);
+                setCurrentNode(result.firstNodeId || "start");
                 setHistory([]);
                 setAiFeedback([]);
-                setView('playing');
-                setIntegrationState({
-                    status: "idle",
-                    lastRequest: null,
-                    payload: null,
-                    error: null
-                });
-
-                if (tenantConfig.modules.voice_overlay && sim && sim.nodes && sim.nodes.start && sim.nodes.start.scene) {
-                    playTTS(sim.nodes.start.scene);
+                setGameState(result.profile || gameState);
+                setLabels(result.labels || []);
+                setView("playing");
+                setIntegrationState({ status: "idle", lastRequest: null, payload: null, error: null });
+                if (tenantConfig.modules.voice_overlay && result.node && result.node.scene) {
+                    playTTS(result.node.scene);
                 }
-                if (user) {
-                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
-                    const experimentsForMission = getActiveExperimentsForContext({
-                        userId: user.uid,
-                        tenantId,
-                        scenarioId: sim.id,
-                        tenantConfig
-                    });
-
-                    const existingLabels = Array.isArray(labels) ? labels : [];
-                    const labelIds = existingLabels.map((entry) => entry && entry.id).filter(Boolean);
-                    const scenarioTags = Object.values(sim.nodes || {}).reduce((acc, node) => {
-                        if (!node || !Array.isArray(node.choices)) {
-                            return acc;
-                        }
-                        node.choices.forEach((choiceEntry) => {
-                            if (choiceEntry && typeof choiceEntry.tag === "string" && !acc.includes(choiceEntry.tag)) {
-                                acc.push(choiceEntry.tag);
-                            }
-                        });
-                        return acc;
-                    }, []);
-
-                    if (Object.keys(experimentsForMission).length > 0) {
-                        PlatformClient.logEvent(
-                            user.uid,
-                            "experiment_assignment",
-                            {
-                                scenarioId: sim.id
-                            },
-                            {
-                                tenantId,
-                                experiments: experimentsForMission
-                            }
-                        );
-                    }
-
-                    PlatformClient.logEvent(
+                if (user && Object.keys(experimentsForMission).length > 0) {
+                    await PlatformClient.logEvent(
                         user.uid,
-                        "mission_start",
-                        {
-                            scenarioId: sim.id,
-                            title: sim.title,
-                            xpBefore: gameState.xp,
-                            xpAfter: gameState.xp,
-                            labelsBefore: labelIds,
-                            labelsAfter: labelIds,
-                            scenarioTags
-                        },
-                        {
-                            tenantId,
-                            experiments: experimentsForMission
-                        }
+                        "experiment_assignment",
+                        { scenarioId: sim.id },
+                        { tenantId, experiments: experimentsForMission }
                     );
                 }
-
-                runExternalDataHooksForNode(sim, 'start');
+                runExternalDataHooksForNode(result.scenario || sim, result.firstNodeId || "start");
+                getScenarioGovernance(window.__app_id, sim.id)
+                    .then((gov) => setCurrentScenarioIsHighRisk(isHighRiskScenario(gov)))
+                    .catch(() => setCurrentScenarioIsHighRisk(false));
             };
 
             const handleDecision = async (choice) => {
@@ -1797,23 +1960,16 @@
 
                 if (tenantConfig.modules.mentor_persona) {
                     setIsGenerating(true);
-
                     const isTeamMode = currentSim && currentSim.mode === "team";
                     const personaList = isTeamMode
                         ? PERSONAS.filter((persona) => persona.id === "mentor" || persona.id === "boss" || persona.id === "peer")
                         : [getActivePersona(adminConfig)];
-
                     const meta = gameState.meta || createMeta();
                     const profileSummary = formatProfileSummaryForPrompt(gameState, allScenarios);
                     const historySummary = formatDecisionHistoryForPrompt(nextHistory);
-
                     const feedbackEntries = [];
-
                     for (const persona of personaList) {
-                        const trustScoreRaw = meta.personaTrust && typeof meta.personaTrust[persona.id] === "number"
-                            ? meta.personaTrust[persona.id]
-                            : 0;
-
+                        const trustScoreRaw = meta.personaTrust && typeof meta.personaTrust[persona.id] === "number" ? meta.personaTrust[persona.id] : 0;
                         const prompt = `
 Persona: ${persona.label} (${persona.role}).
 Tone: ${persona.tone}.
@@ -1835,128 +1991,45 @@ Current trust score with you (range -100 to 100): ${trustScoreRaw}.
 
 Provide feedback in a maximum of 2 sentences from this persona's point of view.
 Focus on decision quality, trade-offs, and how this choice affects long-term trust and team dynamics.`;
-
                         const text = await PlatformClient.getMentorFeedback(prompt);
                         if (text) {
-                            feedbackEntries.push({
-                                personaId: persona.id,
-                                heading: getPersonaFeedbackHeading(persona.id),
-                                text
-                            });
+                            feedbackEntries.push({ personaId: persona.id, heading: getPersonaFeedbackHeading(persona.id), text });
                         }
                     }
-
                     setAiFeedback(feedbackEntries);
                     setIsGenerating(false);
                 }
-                if (user) {
-                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
-                    const experimentsForMission = getActiveExperimentsForContext({
-                        userId: user.uid,
-                        tenantId,
-                        scenarioId: currentSim.id,
-                        tenantConfig
-                    });
 
-                    PlatformClient.logEvent(
-                        user.uid,
-                        "decision_made",
-                        {
-                            scenarioId: currentSim.id,
-                            nodeId: currentNode,
-                            choiceText: choice.text,
-                            tag: choice.tag || null,
-                            competencyIds: getCompetencyIdsForTag(choice.tag)
-                        },
-                        {
-                            tenantId,
-                            experiments: experimentsForMission
-                        }
-                    );
-                }
-                
-                if (currentSim.nodes[choice.next]?.isEnd) {
-                    const previousXp = gameState.xp;
-                    const xpAwarded = typeof choice.xp === "number" ? choice.xp : 30;
-                    const newXp = previousXp + xpAwarded;
-                    const newComp = { ...gameState.completed, [currentSim.id]: true };
-                    const nextMeta = applyEffectsToMeta(gameState.meta, choice.effects);
-                    const nextCompetencyEvidence = updateCompetencyEvidence(competencyEvidence, currentSim.id, nextHistory);
-                    const updated = { xp: newXp, completed: newComp, meta: nextMeta, competencyEvidence: nextCompetencyEvidence };
-                    setGameState(updated);
-                    const completedCount = Object.keys(newComp).length;
-                    const nextLabels = computeLabels(newXp, completedCount, nextCompetencyEvidence);
-                    const previousLabels = Array.isArray(labels) ? labels : [];
-                    setLabels(nextLabels);
-                    if (user) {
-                        PlatformClient.updateProfile(
-                            window.__app_id,
-                            user.uid,
-                            { xp: newXp, completed: newComp, labels: nextLabels, meta: nextMeta, competencyEvidence: nextCompetencyEvidence }
-                        );
-                    }
-                    if (user) {
-                        const evidenceForEvent = getCompetencySummaries(nextCompetencyEvidence);
-                        const evidenceCoverage = evidenceForEvent.length;
-                        const evidenceDecisionCount = evidenceForEvent.reduce((total, entry) => total + entry.count, 0);
-                        const labelIdsBefore = previousLabels.map((label) => label && label.id).filter(Boolean);
-                        const labelIdsAfter = nextLabels.map((label) => label && label.id).filter(Boolean);
-                        const scenarioTags = Object.values(currentSim.nodes || {}).reduce((acc, node) => {
-                            if (!node || !Array.isArray(node.choices)) {
-                                return acc;
-                            }
-                            node.choices.forEach((choiceEntry) => {
-                                if (choiceEntry && typeof choiceEntry.tag === "string" && !acc.includes(choiceEntry.tag)) {
-                                    acc.push(choiceEntry.tag);
-                                }
-                            });
-                            return acc;
-                        }, []);
-                        const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
-                        const experimentsForMission = getActiveExperimentsForContext({
-                            userId: user.uid,
-                            tenantId,
-                            scenarioId: currentSim.id,
-                            tenantConfig
-                        });
-
-                        PlatformClient.logEvent(
-                            user.uid,
-                            "mission_complete",
-                            {
-                                scenarioId: currentSim.id,
-                                title: currentSim.title,
-                                xpAwarded,
-                                totalXp: newXp,
-                                xpBefore: previousXp,
-                                xpAfter: newXp,
-                                labelsBefore: labelIdsBefore,
-                                labelsAfter: labelIdsAfter,
-                                scenarioTags,
-                                labels: labelIdsAfter,
-                                competencyEvidenceCoverage: evidenceCoverage,
-                                competencyEvidenceDecisions: evidenceDecisionCount
-                            },
-                            {
-                                tenantId,
-                                experiments: experimentsForMission
-                            }
-                        );
-                    }
-                    setView('summary');
+                const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
+                const experimentsForMission = user
+                    ? getActiveExperimentsForContext({ userId: user.uid, tenantId, scenarioId: currentSim.id, tenantConfig })
+                    : {};
+                const labelIdsBefore = Array.isArray(labels) ? labels.map((l) => l && l.id).filter(Boolean) : [];
+                const result = await PlatformClient.submitDecision({
+                    appId: window.__app_id,
+                    userId: user ? user.uid : null,
+                    scenarioId: currentSim.id,
+                    nodeId: currentNode,
+                    choiceId: choice.next,
+                    choice: { text: choice.text, tag: choice.tag, next: choice.next, xp: choice.xp, effects: choice.effects },
+                    profile: gameState,
+                    history: nextHistory,
+                    scenario: currentSim,
+                    tenantId,
+                    experiments: Object.keys(experimentsForMission).length > 0 ? experimentsForMission : null,
+                    labelsBefore: labels
+                });
+                setGameState(result.profile);
+                setLabels(result.labels);
+                if (result.terminal) {
+                    setView("summary");
                 } else {
-                    const nextMeta = applyEffectsToMeta(gameState.meta, choice.effects);
-                    setGameState(prev => ({ ...prev, meta: nextMeta }));
-
-                    const nextNodeId = choice.next;
-                    setCurrentNode(nextNodeId);
-
-                    const nextNode = currentSim && currentSim.nodes ? currentSim.nodes[nextNodeId] : null;
+                    setCurrentNode(choice.next);
+                    const nextNode = currentSim && currentSim.nodes ? currentSim.nodes[choice.next] : null;
                     if (tenantConfig.modules.voice_overlay && nextNode && nextNode.scene) {
                         playTTS(nextNode.scene);
                     }
-
-                    runExternalDataHooksForNode(currentSim, nextNodeId);
+                    runExternalDataHooksForNode(currentSim, choice.next);
                 }
             };
 
@@ -2110,14 +2183,14 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                 );
             };
 
-            const ToolsPanel = ({ meta, scenario, nodeId, integrationState, onToolEvent }) => {
+            const ToolsPanel = ({ meta, scenario, nodeId, integrationState, onToolEvent, isHighRiskScenario: isHighRisk }) => {
                 const [activeToolId, setActiveToolId] = useState("headcount_planner");
                 const [location, setLocation] = useState("Berlin");
                 const [roles, setRoles] = useState(60);
                 const [months, setMonths] = useState(6);
                 const [note, setNote] = useState("");
 
-                const enabledToolIds = getToolsForScenario(scenario);
+                const enabledToolIds = getToolsForScenario(scenario, { isHighRiskScenario: isHighRisk === true });
                 const toolsToRender = enabledToolIds.length > 0 ? enabledToolIds : DEFAULT_TOOL_IDS;
                 const effectiveActiveToolId = toolsToRender.includes(activeToolId)
                     ? activeToolId
@@ -2378,7 +2451,9 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                         <div className="flex items-center justify-between gap-2">
                             <h4 className="text-[9px] mono text-white/30 uppercase tracking-[0.2em]">TI_TOOLS · WORKSPACE</h4>
                         </div>
-
+                        {isHighRisk && (
+                            <p className="text-[9px] text-amber-400/90 mono">Evidence board recommended for this scenario.</p>
+                        )}
                         <div className="flex gap-1 text-[10px] mono overflow-x-auto">
                             {toolsToRender.map((toolId) => {
                                 const def = getToolDefinition(toolId);
@@ -3320,6 +3395,73 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                                             </div>
                                         </div>
                                     </div>
+                                    <div className="glass p-5 rounded border border-white/10 space-y-3">
+                                        <h3 className="text-xs mono text-white/40 uppercase tracking-[0.2em]">SCENARIO_GOVERNANCE</h3>
+                                        <p className="text-[11px] text-white/40 mb-2">
+                                            Read-only governance status per scenario. Only approved scenarios can be enabled for production tenants.
+                                        </p>
+                                        <div className="flex gap-2 mb-3">
+                                            <button
+                                                onClick={async () => {
+                                                    setGovernanceLoading(true);
+                                                    const appId = window.__app_id;
+                                                    const scenarioIds = visibleScenarios.map((s) => s && s.id).filter(Boolean);
+                                                    const next = {};
+                                                    for (const scenarioId of scenarioIds) {
+                                                        try {
+                                                            const gov = await getScenarioGovernance(appId, scenarioId);
+                                                            next[scenarioId] = gov;
+                                                        } catch (e) {
+                                                            next[scenarioId] = null;
+                                                        }
+                                                    }
+                                                    setGovernanceByScenarioId(next);
+                                                    setGovernanceLoading(false);
+                                                }}
+                                                disabled={governanceLoading}
+                                                className="px-3 py-1 text-[10px] mono rounded border border-sky-500/60 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 disabled:opacity-50"
+                                            >
+                                                {governanceLoading ? "LOADING…" : "REFRESH_GOVERNANCE"}
+                                            </button>
+                                            <button
+                                                onClick={async () => {
+                                                    const ok = await seedScenarioGovernance(window.__app_id, "vt1", { governanceStatus: "approved", releaseChannel: "ga" });
+                                                    if (ok) {
+                                                        const gov = await getScenarioGovernance(window.__app_id, "vt1");
+                                                        setGovernanceByScenarioId((prev) => ({ ...prev, vt1: gov }));
+                                                    }
+                                                }}
+                                                className="px-3 py-1 text-[10px] mono rounded border border-amber-500/40 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20"
+                                            >
+                                                SEED_GOVERNANCE_VT1
+                                            </button>
+                                        </div>
+                                        <div className="space-y-2 max-h-48 overflow-y-auto text-[11px]">
+                                            {visibleScenarios.map((s) => {
+                                                const gov = governanceByScenarioId[s.id];
+                                                const status = gov ? (gov.governanceStatus || "draft") : "No governance record";
+                                                const channel = gov && gov.releaseChannel ? gov.releaseChannel : "—";
+                                                const tags = Array.isArray(gov && gov.riskTags) ? gov.riskTags : [];
+                                                const reviewed = gov && gov.lastReviewedAt ? (typeof gov.lastReviewedAt === "string" ? gov.lastReviewedAt : "set") : "—";
+                                                return (
+                                                    <div key={s.id} className="flex flex-wrap items-center gap-2 py-2 border-b border-white/5 last:border-b-0">
+                                                        <span className="mono text-white/60 w-20 shrink-0">{s.id}</span>
+                                                        <span className="font-semibold text-white/90">{s.title}</span>
+                                                        <span className={"px-1.5 py-0.5 rounded text-[10px] mono " + (status === "approved" ? "bg-emerald-500/20 text-emerald-200" : status === "draft" ? "bg-white/10 text-white/50" : "bg-amber-500/20 text-amber-200")}>{status}</span>
+                                                        <span className="text-white/40 mono text-[10px]">{channel}</span>
+                                                        {tags.length > 0 && (
+                                                            <span className="flex gap-1 flex-wrap">
+                                                                {tags.map((tag) => (
+                                                                    <span key={tag} className="px-1.5 py-0.5 rounded bg-white/10 text-white/50 mono text-[9px]">{tag}</span>
+                                                                ))}
+                                                            </span>
+                                                        )}
+                                                        {reviewed !== "—" && <span className="text-white/30 text-[9px]">Reviewed: {reviewed}</span>}
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    </div>
                                     <ScenarioEditorPanel
                                         allScenarios={allScenarios}
                                         onImportScenario={(scenario) => {
@@ -3436,6 +3578,7 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                                             nodeId={currentNode}
                                             integrationState={integrationState}
                                             onToolEvent={handleToolEvent}
+                                            isHighRiskScenario={currentScenarioIsHighRisk}
                                         />
                                     </div>
                                 </div>
