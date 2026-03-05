@@ -2652,7 +2652,7 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                     }
                 };
 
-            const handleToolEvent = (toolEvent) => {
+            const handleSimulationToolEvent = (toolEvent) => {
                 if (!toolEvent || typeof toolEvent.toolId !== "string") {
                     return;
                 }
@@ -3601,7 +3601,7 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                                             scenario={currentSim}
                                             nodeId={currentNode}
                                             integrationState={integrationState}
-                                            onToolEvent={handleToolEvent}
+                                            onToolEvent={handleSimulationToolEvent}
                                             isHighRiskScenario={currentScenarioIsHighRisk}
                                         />
                                     </div>
