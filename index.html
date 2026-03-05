@@ -1766,6 +1766,78 @@
             } catch (e) {}
         };
 
+        const processToolEvent = (toolEvent, context) => {
+            if (!toolEvent || typeof toolEvent.toolId !== "string" || !context) {
+                return;
+            }
+
+            const {
+                user,
+                adminConfig,
+                tenantConfig,
+                currentSim,
+                currentNode,
+                gameState,
+                setGameState
+            } = context;
+
+            const scenarioId = toolEvent.scenarioId || (currentSim && currentSim.id) || null;
+            const nodeId = toolEvent.nodeId || currentNode || null;
+
+            const previousMeta = (gameState && gameState.meta) || createMeta();
+            let nextMeta = previousMeta;
+
+            if (toolEvent.metaEffects) {
+                nextMeta = applyEffectsToMeta(previousMeta, toolEvent.metaEffects);
+                if (typeof setGameState === "function") {
+                    setGameState((prev) => {
+                        const safePrev = prev || {};
+                        const metaBefore = safePrev.meta || createMeta();
+                        const metaAfter = applyEffectsToMeta(metaBefore, toolEvent.metaEffects);
+                        return {
+                            ...safePrev,
+                            meta: metaAfter
+                        };
+                    });
+                }
+            }
+
+            if (!user) {
+                return;
+            }
+
+            const tenantId = (adminConfig && adminConfig.activeTenantId) || DEFAULT_TENANT_ID;
+            const experimentsForContext = getActiveExperimentsForContext({
+                userId: user.uid,
+                tenantId,
+                scenarioId,
+                tenantConfig
+            });
+
+            const payload = {
+                scenarioId,
+                nodeId,
+                toolId: toolEvent.toolId,
+                kind: toolEvent.kind || "interaction",
+                inputs: toolEvent.inputs || null,
+                metaBefore: previousMeta,
+                metaAfter: nextMeta,
+                noteLength: typeof toolEvent.noteLength === "number" ? toolEvent.noteLength : null,
+                noteWordCount: typeof toolEvent.noteWordCount === "number" ? toolEvent.noteWordCount : null,
+                hasLinks: Boolean(toolEvent.hasLinks)
+            };
+
+            logEvent(
+                user.uid,
+                "tool_used",
+                payload,
+                {
+                    tenantId,
+                    experiments: experimentsForContext
+                }
+            );
+        };
+
         // UI ROOT
         const App = () => {
             const [view, setView] = useState('welcome');
@@ -2651,63 +2723,6 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                         });
                     }
                 };
-
-            const handleSimulationToolEvent = (toolEvent) => {
-                if (!toolEvent || typeof toolEvent.toolId !== "string") {
-                    return;
-                }
-
-                const scenarioId = toolEvent.scenarioId || (currentSim && currentSim.id) || null;
-                const nodeId = toolEvent.nodeId || currentNode || null;
-
-                const previousMeta = gameState.meta || createMeta();
-                let nextMeta = previousMeta;
-
-                if (toolEvent.metaEffects) {
-                    nextMeta = applyEffectsToMeta(previousMeta, toolEvent.metaEffects);
-                    setGameState((prev) => {
-                        const metaBefore = prev.meta || createMeta();
-                        const metaAfter = applyEffectsToMeta(metaBefore, toolEvent.metaEffects);
-                        return {
-                            ...prev,
-                            meta: metaAfter
-                        };
-                    });
-                }
-
-                if (user) {
-                    const tenantId = adminConfig.activeTenantId || DEFAULT_TENANT_ID;
-                    const experimentsForContext = getActiveExperimentsForContext({
-                        userId: user.uid,
-                        tenantId,
-                        scenarioId,
-                        tenantConfig
-                    });
-
-                    const payload = {
-                        scenarioId,
-                        nodeId,
-                        toolId: toolEvent.toolId,
-                        kind: toolEvent.kind || "interaction",
-                        inputs: toolEvent.inputs || null,
-                        metaBefore: previousMeta,
-                        metaAfter: nextMeta,
-                        noteLength: typeof toolEvent.noteLength === "number" ? toolEvent.noteLength : null,
-                        noteWordCount: typeof toolEvent.noteWordCount === "number" ? toolEvent.noteWordCount : null,
-                        hasLinks: Boolean(toolEvent.hasLinks)
-                    };
-
-                    logEvent(
-                        user.uid,
-                        "tool_used",
-                        payload,
-                        {
-                            tenantId,
-                            experiments: experimentsForContext
-                        }
-                    );
-                }
-            };
 
                 const knownTags = KNOWN_COMPETENCY_TAGS;
 
@@ -3601,7 +3616,17 @@ Focus on decision quality, trade-offs, and how this choice affects long-term tru
                                             scenario={currentSim}
                                             nodeId={currentNode}
                                             integrationState={integrationState}
-                                            onToolEvent={handleSimulationToolEvent}
+                                            onToolEvent={(toolEvent) =>
+                                                processToolEvent(toolEvent, {
+                                                    user,
+                                                    adminConfig,
+                                                    tenantConfig,
+                                                    currentSim,
+                                                    currentNode,
+                                                    gameState,
+                                                    setGameState
+                                                })
+                                            }
                                             isHighRiskScenario={currentScenarioIsHighRisk}
                                         />
                                     </div>
