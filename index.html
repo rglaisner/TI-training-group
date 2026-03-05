@@ -485,6 +485,24 @@
             return createDefaultAdminState();
         };
 
+        const loadCustomScenarios = () => {
+            try {
+                const stored = window.localStorage.getItem(CUSTOM_SCENARIOS_STORAGE_KEY);
+                if (!stored) {
+                    return [];
+                }
+
+                const parsed = JSON.parse(stored);
+                if (!Array.isArray(parsed)) {
+                    return [];
+                }
+
+                return parsed.filter((scenario) => scenario && typeof scenario.id === "string");
+            } catch (error) {
+                return [];
+            }
+        };
+
         const saveAdminConfig = (config) => {
             try {
                 window.localStorage.setItem(ADMIN_STORAGE_KEY_V2, JSON.stringify(config));
