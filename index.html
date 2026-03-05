@@ -1896,6 +1896,12 @@
             };
 
             useEffect(() => {
+                if (!window.fb || !window.fb.auth || !window.fb.onAuthStateChanged || !window.fb.signInAnonymously) {
+                    // If Firebase isn't available (e.g. blocked by network/ad-blocker), run in offline/demo mode.
+                    setUser(null);
+                    return;
+                }
+
                 const { auth, onAuthStateChanged, signInAnonymously } = window.fb;
                 onAuthStateChanged(auth, async (u) => {
                     if (u) {
